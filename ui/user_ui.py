@@ -77,16 +77,21 @@ class LoginThread(QThread):
             result = loop.run_until_complete(
                 account_service.login(
                     name=self.account_data["username"],
-                    password=self.account_data["password"]
+                    password=self.account_data["password"],
+                    channel_name=self.account_data.get("channel_name"),
+                    shop_id=self.account_data.get("shop_id"),
+                    user_id=self.account_data.get("user_id"),
+                    login_mode=self.account_data.get("login_mode", "password"),
                 )
             )
-            
-            loop.close()
             self.login_finished.emit(result)
             
         except Exception as e:
             logger.error(f"登录线程异常: error_type={type(e).__name__}")
             self.login_finished.emit(False)
+        finally:
+            if "loop" in locals():
+                loop.close()
 
 
 class AccountCard(CardWidget):
@@ -327,6 +332,7 @@ class UserManagerWidget(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent=parent)
         self.accounts_data = []  # 存储账号数据
+        self.login_threads = {}
         self._loaded_once = False
         self.setupUI()
         QTimer.singleShot(300, self._maybeLoadOnShow)
@@ -534,6 +540,15 @@ class UserManagerWidget(QFrame):
     
     def onVerifyAccount(self, account_data: dict):
         """验证账号"""
+        account_key = (
+            account_data.get("channel_name"),
+            account_data.get("shop_id"),
+            account_data.get("user_id"),
+        )
+        active_thread = self.login_threads.get(account_key)
+        if active_thread and active_thread.isRunning():
+            return
+
         # 找到对应的账号卡片
         account_card = None
         for i in range(self.accounts_layout.count() - 1):  # -1 因为最后一个是stretch
@@ -549,11 +564,15 @@ class UserManagerWidget(QFrame):
         account_card.setVerifyStatus(True)
         
         # 创建并启动登录线程
-        self.login_thread = LoginThread(account_data)
-        self.login_thread.login_finished.connect(
+        login_thread = LoginThread(account_data)
+        self.login_threads[account_key] = login_thread
+        login_thread.login_finished.connect(
             lambda result: self.onLoginFinished(account_card, account_data, result)
         )
-        self.login_thread.start()
+        login_thread.finished.connect(
+            lambda: self.login_threads.pop(account_key, None)
+        )
+        login_thread.start()
     
     def onLoginFinished(self, account_card: AccountCard, account_data: dict, result: Optional[Dict[str, Any]]):
         """登录完成回调"""
@@ -561,7 +580,7 @@ class UserManagerWidget(QFrame):
         account_card.setVerifyStatus(False)
         
         try:
-            if result:  # 登录成功，result是一个包含信息的字典
+            if isinstance(result, dict):
                 # 首先更新cookies（重要！）
                 cookies_updated = account_service.update_account_cookies(
                     channel_name=account_data["channel_name"],
@@ -581,7 +600,13 @@ class UserManagerWidget(QFrame):
                 if cookies_updated and status_updated:
                     # 更新卡片状态显示
                     account_card.updateStatus(1)
-                    QMessageBox.information(self, "验证成功", f"账号 '{account_data['username']}")
+                    QMessageBox.information(
+                        self,
+                        "验证成功",
+                        f"账号 '{account_data['username']}' 验证成功。",
+                    )
+                else:
+                    QMessageBox.warning(self, "验证失败", "登录成功，但账号状态保存失败。")
                
             else:  # 登录失败，result为False
                 # 登录失败，更新数据库状态为离线
@@ -701,8 +726,11 @@ class UserManagerWidget(QFrame):
                         user_id=new_data["user_id"],
                         username=new_data["username"],
                         password=new_data["password"],
-                        cookies=account_data.get("cookies")
+                        cookies="",
+                        status=3,
                     )
+                    new_data["status"] = 3
+                    status_changed = False
                 
                 # 如果状态变化，仅更新状态
                 if status_changed:
@@ -893,15 +921,30 @@ class AddAccountDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("通过登录添加账号")
         self.setModal(True)
-        self.resize(400, 200)
+        self.resize(420, 240)
         self.setupUI()
     
     def setupUI(self):
         """设置对话框UI"""
-        from qfluentwidgets import LineEdit, PrimaryPushButton, PushButton
+        from qfluentwidgets import (
+            LineEdit, PrimaryPushButton, PushButton, SegmentedWidget
+        )
 
         layout = QFormLayout(self)
         layout.setSpacing(15)
+
+        self.login_mode = "qr"
+        self.login_mode_selector = SegmentedWidget(self)
+        self.login_mode_selector.addItem(
+            routeKey="qr", text="扫码登录", onClick=lambda: self.setLoginMode("qr")
+        )
+        self.login_mode_selector.addItem(
+            routeKey="password",
+            text="账号密码",
+            onClick=lambda: self.setLoginMode("password"),
+        )
+        self.login_mode_selector.setCurrentItem("qr")
+        layout.addRow("登录方式:", self.login_mode_selector)
         
         # 账号信息
         self.username_edit = LineEdit(self)
@@ -931,14 +974,15 @@ class AddAccountDialog(QDialog):
         # 连接信号
         self.ok_btn.clicked.connect(self.validateAndAccept)
         self.cancel_btn.clicked.connect(self.reject)
+        self.setLoginMode("qr")
     
     def validateAndAccept(self):
         """验证输入并接受"""
-        if not self.username_edit.text().strip():
+        if self.login_mode == "password" and not self.username_edit.text().strip():
             QMessageBox.warning(self, "输入错误", "用户名不能为空！")
             return
             
-        if not self.password_edit.text().strip():
+        if self.login_mode == "password" and not self.password_edit.text().strip():
             QMessageBox.warning(self, "输入错误", "密码不能为空！")
             return
             
@@ -947,6 +991,15 @@ class AddAccountDialog(QDialog):
     def getAccountInfo(self) -> dict:
         """获取账号信息"""
         return {
-            "username": self.username_edit.text().strip(),
-            "password": self.password_edit.text().strip()
+            "username": self.username_edit.text().strip() if self.login_mode == "password" else "",
+            "password": self.password_edit.text().strip() if self.login_mode == "password" else "",
+            "login_mode": self.login_mode,
         }
+
+    def setLoginMode(self, login_mode: str):
+        self.login_mode = login_mode
+        password_mode = login_mode == "password"
+        layout = self.layout()
+        layout.setRowVisible(self.username_edit, password_mode)
+        layout.setRowVisible(self.password_edit, password_mode)
+        self.resize(420, 240 if password_mode else 150)

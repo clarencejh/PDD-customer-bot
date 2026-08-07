@@ -339,9 +339,12 @@ class ProductSyncService:
             LLM提取的产品知识文本
         """
         # 读取LLM配置
-        model_name = get_config("llm.model_name", "gpt-4o")
-        api_key = get_config("llm.api_key", "")
-        api_base = get_config("llm.api_base", None)
+        from config import get_active_llm_config
+
+        llm_config = get_active_llm_config()
+        model_name = llm_config.get("model_name") or "gpt-4o"
+        api_key = llm_config.get("api_key", "")
+        api_base = llm_config.get("api_base") or None
 
         if not api_key:
             logger.warning("LLM API key not configured, returning basic info only")

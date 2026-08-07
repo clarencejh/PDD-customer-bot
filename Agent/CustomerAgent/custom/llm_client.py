@@ -82,6 +82,32 @@ class LLMClient:
             if hasattr(result, "__await__"):
                 await result
 
+    async def test_connection(self) -> None:
+        """Perform a minimal completion to validate URL, key and model together."""
+        if not self._client:
+            raise RuntimeError("LLM 客户端未初始化，请先调用 initialize()")
+
+        response = await self._client.chat.completions.create(
+            model=self.model_name,
+            messages=[{"role": "user", "content": "Reply with OK."}],
+            temperature=0,
+            max_tokens=1,
+        )
+        if not response.choices:
+            raise RuntimeError("API 返回成功，但响应中没有可用结果")
+
+    async def list_models(self) -> List[str]:
+        """Return model IDs exposed by an OpenAI-compatible provider."""
+        if not self._client:
+            raise RuntimeError("LLM 客户端未初始化，请先调用 initialize()")
+        page = await self._client.models.list()
+        model_ids = {
+            str(model.id).strip()
+            for model in page.data
+            if getattr(model, "id", None)
+        }
+        return sorted(model_ids, key=str.casefold)
+
     async def chat(
         self,
         messages: List[Dict[str, Any]],

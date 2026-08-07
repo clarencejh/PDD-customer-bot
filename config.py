@@ -14,7 +14,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 from contextlib import contextmanager
-from pydantic import BaseModel, Field, field_validator, ConfigDict
+from urllib.parse import urlsplit, urlunsplit
+from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
 from utils.runtime_path import get_config_path
 from utils.secret_store import protect_secret, unprotect_secret
 
@@ -35,6 +36,46 @@ class LLMConfig(BaseModel):
     model_name: str = Field(default="", description="模型名称")
     api_key: str = Field(default="", description="API密钥")
     api_base: str = Field(default="", description="API地址")
+
+    @field_validator("model_name", "api_key")
+    @classmethod
+    def strip_llm_values(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("api_base")
+    @classmethod
+    def validate_api_base(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            return value
+
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("API Base URL 必须是有效的 HTTP(S) 地址")
+        if parsed.username or parsed.password:
+            raise ValueError("API Base URL 不能包含用户名或密码")
+        if parsed.query or parsed.fragment:
+            raise ValueError("API Base URL 不能包含查询参数或片段")
+
+        normalized_path = parsed.path.rstrip("/")
+        return urlunsplit(
+            (parsed.scheme.lower(), parsed.netloc, normalized_path, "", "")
+        )
+
+
+class LLMProviderConfig(LLMConfig):
+    """Named OpenAI-compatible API provider configuration."""
+
+    id: str = Field(min_length=1, description="供应商稳定标识")
+    name: str = Field(min_length=1, description="供应商显示名称")
+
+    @field_validator("id", "name")
+    @classmethod
+    def strip_provider_values(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("供应商标识和名称不能为空")
+        return value
 
 
 class BusinessHoursConfig(BaseModel):
@@ -68,11 +109,25 @@ class ConfigModel(BaseModel):
         default_factory=LLMConfig,
         description="LLM配置"
     )
+    active_llm_provider: str = Field(default="", description="当前LLM供应商")
+    llm_providers: list[LLMProviderConfig] = Field(
+        default_factory=list,
+        description="LLM供应商配置列表",
+    )
     prompt: PromptConfig = Field(
         default_factory=PromptConfig,
         description="提示词配置"
     )
     db_path: str = Field(default="./temp/channel_shop.db", description="数据库路径")
+
+    @model_validator(mode="after")
+    def validate_llm_providers(self):
+        provider_ids = [provider.id for provider in self.llm_providers]
+        if len(provider_ids) != len(set(provider_ids)):
+            raise ValueError("LLM供应商标识不能重复")
+        if self.active_llm_provider and self.active_llm_provider not in provider_ids:
+            raise ValueError("当前LLM供应商不存在")
+        return self
 
 
 
@@ -88,6 +143,16 @@ config_base = {
         "api_key": "",
         "api_base": ""
     },
+    "active_llm_provider": "default",
+    "llm_providers": [
+        {
+            "id": "default",
+            "name": "默认供应商",
+            "model_name": "",
+            "api_key": "",
+            "api_base": ""
+        }
+    ],
     "prompt": {
         "instructions": [
             "1. 请用中文回复客户问题",
@@ -203,8 +268,7 @@ class Config:
                 if os.name == "nt" and self._needs_secret_migration:
                     # Migrate legacy plaintext API keys on the next successful
                     # load; this is an atomic rewrite and preserves all fields.
-                    self.save()
-                    self._needs_secret_migration = False
+                    self._needs_secret_migration = not self.save()
                 return self._config
             except ConfigFileNotFoundError:
                 if self.auto_create:
@@ -292,6 +356,9 @@ class Config:
             if self._config is None:
                 self._config = copy.deepcopy(config_base)
 
+            original_config = copy.deepcopy(self._config)
+            original_validated = self._validated_config
+
             # 解析嵌套键
             keys = key.split('.')
             current = self._config
@@ -308,9 +375,11 @@ class Config:
             # 重新验证配置
             try:
                 self._validated_config = ConfigModel(**self._config)
-                if save:
-                    self.save()
+                if save and not self.save():
+                    raise ConfigError("配置文件写入失败")
             except Exception as e:
+                self._config = original_config
+                self._validated_config = original_validated
                 raise ConfigValidationError(f"设置配置项失败: {e}")
 
             return value
@@ -330,16 +399,21 @@ class Config:
             if self._config is None:
                 self._config = copy.deepcopy(config_base)
 
+            original_config = copy.deepcopy(self._config)
+            original_validated = self._validated_config
+
             # 深度合并配置
             merged_config = self._deep_merge(self._config, config_dict)
 
             try:
                 self._validated_config = ConfigModel(**merged_config)
                 self._config = merged_config
-                if save:
-                    self.save()
+                if save and not self.save():
+                    raise ConfigError("配置文件写入失败")
                 return self._config
             except Exception as e:
+                self._config = original_config
+                self._validated_config = original_validated
                 raise ConfigValidationError(f"批量更新配置失败: {e}")
 
     def save(self) -> bool:
@@ -397,6 +471,11 @@ class Config:
         llm = result.get("llm")
         if isinstance(llm, dict) and "api_key" in llm:
             llm["api_key"] = protect_secret(llm.get("api_key"))
+        providers = result.get("llm_providers")
+        if isinstance(providers, list):
+            for provider in providers:
+                if isinstance(provider, dict) and "api_key" in provider:
+                    provider["api_key"] = protect_secret(provider.get("api_key"))
         return result
 
     @staticmethod
@@ -406,13 +485,28 @@ class Config:
         llm = result.get("llm")
         if isinstance(llm, dict) and "api_key" in llm:
             llm["api_key"] = unprotect_secret(llm.get("api_key"))
+        providers = result.get("llm_providers")
+        if isinstance(providers, list):
+            for provider in providers:
+                if isinstance(provider, dict) and "api_key" in provider:
+                    provider["api_key"] = unprotect_secret(provider.get("api_key"))
         return result
 
     @staticmethod
     def _has_plaintext_secrets(config_data: Dict[str, Any]) -> bool:
         llm = config_data.get("llm") if isinstance(config_data, dict) else None
         api_key = llm.get("api_key") if isinstance(llm, dict) else None
-        return bool(api_key) and not str(api_key).startswith("dpapi:v1:")
+        if bool(api_key) and not str(api_key).startswith("dpapi:v1:"):
+            return True
+        providers = config_data.get("llm_providers", [])
+        if isinstance(providers, list):
+            return any(
+                isinstance(provider, dict)
+                and bool(provider.get("api_key"))
+                and not str(provider.get("api_key")).startswith("dpapi:v1:")
+                for provider in providers
+            )
+        return False
 
     @contextmanager
     def atomic_update(self):
@@ -422,7 +516,8 @@ class Config:
         original_validated = copy.deepcopy(self._validated_config)
         try:
             yield self
-            self.save()
+            if not self.save():
+                raise ConfigError("配置文件写入失败")
         except Exception:
             # 回滚到原始配置
             if original_config is not None:
@@ -466,4 +561,37 @@ def update_config(config_dict: Dict[str, Any], save: bool = False) -> Dict[str, 
 def get_validated_config() -> ConfigModel:
     """全局便捷函数：获取验证后的配置模型"""
     return config.get_model()
+
+
+def resolve_active_llm_config(config_data: Dict[str, Any]) -> Dict[str, str]:
+    """Resolve the selected provider, falling back to the legacy llm object."""
+    providers = config_data.get("llm_providers", [])
+    active_id = config_data.get("active_llm_provider", "")
+    if isinstance(providers, list) and providers:
+        selected = next(
+            (
+                provider
+                for provider in providers
+                if isinstance(provider, dict) and provider.get("id") == active_id
+            ),
+            providers[0],
+        )
+        if isinstance(selected, dict):
+            return {
+                "model_name": str(selected.get("model_name", "")),
+                "api_key": str(selected.get("api_key", "")),
+                "api_base": str(selected.get("api_base", "")),
+            }
+    legacy = config_data.get("llm", {})
+    return {
+        "model_name": str(legacy.get("model_name", "")),
+        "api_key": str(legacy.get("api_key", "")),
+        "api_base": str(legacy.get("api_base", "")),
+    }
+
+
+def get_active_llm_config() -> Dict[str, str]:
+    """Return the currently selected LLM provider configuration."""
+    with config._lock:
+        return resolve_active_llm_config(config._config or config_base)
 

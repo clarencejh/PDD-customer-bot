@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -27,6 +28,15 @@ from utils.secret_store import protect_secret, unprotect_secret
 import utils.secret_store as secret_store
 from database.db_manager import DatabaseManager
 from sqlalchemy import text
+from config import (
+    Config,
+    ConfigModel,
+    ConfigValidationError,
+    LLMConfig,
+    resolve_active_llm_config,
+)
+from service.account_service import AccountService
+from Agent.CustomerAgent.custom.llm_client import LLMClient
 
 
 def _context(from_uid: str, user_id: str = "account-1") -> Context:
@@ -116,6 +126,191 @@ class IdentityRegressionTests(unittest.TestCase):
         self.assertTrue(_profile_scope_matches("pinduoduo:shop:user", "shop", "user"))
         self.assertFalse(_profile_scope_matches("pinduoduo:shop:user", "other", "user"))
         self.assertFalse(_profile_scope_matches("malformed", "shop", "user"))
+
+
+class LoginServiceRegressionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_existing_account_login_is_scoped_to_immutable_identity(self):
+        with mock.patch(
+            "Channel.pinduoduo.pdd_login.login_pdd",
+            new=mock.AsyncMock(return_value={"cookies": "{}"}),
+        ) as login_pdd:
+            await AccountService().login(
+                "name",
+                "password",
+                channel_name="pinduoduo",
+                shop_id="shop-1",
+                user_id="user-1",
+            )
+
+        login_pdd.assert_awaited_once_with(
+            "name",
+            "password",
+            headless=False,
+            profile_scope="pinduoduo:shop-1:user-1",
+            login_mode="password",
+        )
+
+    async def test_partial_account_scope_is_rejected(self):
+        with self.assertRaises(ValueError):
+            await AccountService().login(
+                "name", "password", shop_id="shop-1"
+            )
+
+    async def test_qr_login_does_not_require_credentials(self):
+        with mock.patch(
+            "Channel.pinduoduo.pdd_login.login_pdd",
+            new=mock.AsyncMock(return_value={"username": "scanned-user"}),
+        ) as login_pdd, mock.patch(
+            "service.account_service.uuid.uuid4"
+        ) as uuid4:
+            uuid4.return_value.hex = "session-id"
+            result = await AccountService().login("", "", login_mode="qr")
+
+        self.assertEqual(result["username"], "scanned-user")
+        login_pdd.assert_awaited_once_with(
+            "qr-session-id",
+            "",
+            headless=False,
+            profile_scope=None,
+            login_mode="qr",
+        )
+
+
+class ConfigRegressionTests(unittest.TestCase):
+    def test_llm_api_base_is_validated_and_normalized(self):
+        llm = LLMConfig(
+            api_base=" HTTPS://example.com/openai/v1/ ",
+            api_key=" key ",
+            model_name=" model ",
+        )
+        self.assertEqual(llm.api_base, "https://example.com/openai/v1")
+        self.assertEqual(llm.api_key, "key")
+        self.assertEqual(llm.model_name, "model")
+
+        for invalid_url in (
+            "example.com/v1",
+            "ftp://example.com/v1",
+            "https://user:pass@example.com/v1",
+            "https://example.com/v1?key=secret",
+        ):
+            with self.subTest(invalid_url=invalid_url):
+                with self.assertRaises(ValueError):
+                    LLMConfig(api_base=invalid_url)
+
+    def test_failed_config_save_rolls_back_memory(self):
+        with TemporaryDirectory() as directory:
+            manager = Config(Path(directory) / "config.json")
+            original_model = manager.get("llm.model_name")
+            with mock.patch.object(manager, "save", return_value=False):
+                with self.assertRaises(ConfigValidationError):
+                    manager.update(
+                        {"llm": {"model_name": "unsaved-model"}}, save=True
+                    )
+            self.assertEqual(manager.get("llm.model_name"), original_model)
+
+    def test_active_llm_provider_is_resolved(self):
+        resolved = resolve_active_llm_config({
+            "active_llm_provider": "second",
+            "llm": {"model_name": "legacy"},
+            "llm_providers": [
+                {
+                    "id": "first",
+                    "name": "First",
+                    "model_name": "model-1",
+                    "api_key": "key-1",
+                    "api_base": "https://first.example/v1",
+                },
+                {
+                    "id": "second",
+                    "name": "Second",
+                    "model_name": "model-2",
+                    "api_key": "key-2",
+                    "api_base": "https://second.example/v1",
+                },
+            ],
+        })
+        self.assertEqual(resolved["model_name"], "model-2")
+        self.assertEqual(resolved["api_key"], "key-2")
+
+    def test_provider_secrets_are_protected_before_persisting(self):
+        data = {
+            "llm": {"api_key": "legacy-key"},
+            "llm_providers": [
+                {"id": "one", "name": "One", "api_key": "provider-key"}
+            ],
+        }
+        with mock.patch("config.protect_secret", side_effect=lambda value: f"enc:{value}"):
+            protected = Config._protect_secrets(data)
+        self.assertEqual(protected["llm"]["api_key"], "enc:legacy-key")
+        self.assertEqual(
+            protected["llm_providers"][0]["api_key"], "enc:provider-key"
+        )
+        self.assertEqual(data["llm_providers"][0]["api_key"], "provider-key")
+
+    def test_active_provider_must_exist(self):
+        with self.assertRaises(ValueError):
+            ConfigModel(
+                active_llm_provider="missing",
+                llm_providers=[{"id": "one", "name": "One"}],
+            )
+
+
+class LLMProviderTaskRegressionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_model_list_is_deduplicated_and_sorted(self):
+        client = LLMClient("key", "https://example.com/v1", "model", 0)
+        fake_client = SimpleNamespace(
+            models=SimpleNamespace(
+                list=mock.AsyncMock(
+                    return_value=SimpleNamespace(
+                        data=[
+                            SimpleNamespace(id="z-model"),
+                            SimpleNamespace(id="A-model"),
+                            SimpleNamespace(id="z-model"),
+                            SimpleNamespace(id=""),
+                        ]
+                    )
+                )
+            )
+        )
+        client._client = fake_client
+        self.assertEqual(await client.list_models(), ["A-model", "z-model"])
+
+    async def test_batch_provider_test_isolates_failures(self):
+        from ui.setting_ui import LLMBatchTestThread
+
+        class FakeClient:
+            def __init__(self, api_key, **kwargs):
+                self.api_key = api_key
+
+            async def initialize(self):
+                return None
+
+            async def test_connection(self):
+                if self.api_key == "bad":
+                    raise RuntimeError("failed")
+
+            async def close(self):
+                return None
+
+        providers = [
+            {
+                "id": "good-provider",
+                "api_key": "good",
+                "api_base": "https://good.example/v1",
+                "model_name": "good-model",
+            },
+            {
+                "id": "bad-provider",
+                "api_key": "bad",
+                "api_base": "https://bad.example/v1",
+                "model_name": "bad-model",
+            },
+        ]
+        with mock.patch("ui.setting_ui.LLMClient", FakeClient):
+            results = await LLMBatchTestThread(providers)._test_all()
+
+        self.assertTrue(results["good-provider"][0])
+        self.assertFalse(results["bad-provider"][0])
 
 
 class ToolScopeRegressionTests(unittest.TestCase):

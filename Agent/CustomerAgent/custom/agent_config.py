@@ -6,7 +6,7 @@ Agent 配置模块
 from typing import List, Optional
 from dataclasses import dataclass, field
 
-from config import get_config
+from config import get_active_llm_config, get_config
 from utils.logger_loguru import get_logger
 
 logger = get_logger("AgentConfig")
@@ -38,9 +38,11 @@ class AgentConfig:
     temperature: float = DEFAULT_TEMPERATURE
 
     # LLM 配置
-    model_name: str = field(default_factory=lambda: get_config("llm.model_name", "gpt-3.5-turbo"))
-    api_key: str = field(default_factory=lambda: get_config("llm.api_key", ""))
-    api_base: str = field(default_factory=lambda: get_config("llm.api_base", ""))
+    model_name: str = field(
+        default_factory=lambda: get_active_llm_config().get("model_name") or "gpt-3.5-turbo"
+    )
+    api_key: str = field(default_factory=lambda: get_active_llm_config().get("api_key", ""))
+    api_base: str = field(default_factory=lambda: get_active_llm_config().get("api_base", ""))
 
     # Prompt 配置（仅 instructions 可配置，description 和 additional_context 由代码硬编码）
     instructions: List[str] = field(default_factory=lambda: get_config("prompt.instructions", []))
