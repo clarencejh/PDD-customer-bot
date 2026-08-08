@@ -26,8 +26,6 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@v5
-        with:
-          fetch-depth: 0  # 拉全量历史与 tag，git describe 读版本号需要
 
       - name: 安装 uv
         uses: astral-sh/setup-uv@v7
@@ -52,9 +50,6 @@ jobs:
 
       - name: 构建 onedir + 安装程序
         run: .venv\Scripts\python.exe scripts\build_win_exe.py --clean
-        env:
-          # tag 触发时 github.ref_name 即版本号（如 v1.3）；脚本会去掉前导 v
-          APP_VERSION: ${{ github.ref_name }}
 
       - name: 上传安装程序 Artifact
         uses: actions/upload-artifact@v7

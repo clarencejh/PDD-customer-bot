@@ -88,7 +88,7 @@ python scripts/build_win_exe.py --clean
 1. 用 PyInstaller 打包应用（产物 `dist/AgentCustomer/`，含内置 Playwright 驱动）
 2. 调用 Inno Setup 压缩为单个安装程序（产物 `dist/installer/Agent-Customer-Setup-<版本号>.exe`）
 
-版本号自动从最近的 git tag 读取（去掉前导 `v`），也可用环境变量 `APP_VERSION` 指定。
+版本号统一维护在 `core/app_version.py`，应用界面、Python 包元数据和安装包均读取该文件。
 
 > 若仅需 PyInstaller 的 onedir 目录、不生成安装程序，加 `--skip-installer`。
 
@@ -97,8 +97,8 @@ python scripts/build_win_exe.py --clean
 推送 `v*` 格式的 tag 会触发 GitHub Actions 自动构建并发布 Release：
 
 ```bash
-git tag v1.4
-git push origin v1.4
+git tag v1.4.0
+git push origin v1.4.0
 ```
 
 构建产物（`Agent-Customer-Setup-<版本号>.exe`）会自动上传到该 tag 对应的 Release 页，即上文「下载安装」的来源。

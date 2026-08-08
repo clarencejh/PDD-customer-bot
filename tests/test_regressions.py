@@ -753,6 +753,27 @@ class SystemNotificationRegressionTests(unittest.TestCase):
         notify.assert_called_once()
 
 
+class VersionSystemRegressionTests(unittest.TestCase):
+    def test_project_uses_single_version_source(self):
+        import tomllib
+        from core.app_version import APP_VERSION, DISPLAY_VERSION, __version__
+        from scripts.build_win_exe import get_version
+
+        self.assertEqual(__version__, "1.4.0")
+        self.assertEqual(APP_VERSION, __version__)
+        self.assertEqual(DISPLAY_VERSION, "v1.4.0")
+        self.assertEqual(get_version(), APP_VERSION)
+
+        project_file = Path(__file__).resolve().parents[1] / "pyproject.toml"
+        with project_file.open("rb") as file:
+            project = tomllib.load(file)
+        self.assertEqual(project["project"]["dynamic"], ["version"])
+        self.assertEqual(
+            project["tool"]["hatch"]["version"]["path"],
+            "core/app_version.py",
+        )
+
+
 class KnowledgeImportRegressionTests(unittest.TestCase):
     def test_csv_template_has_bom_and_expected_headers(self):
         from ui.Knowledge_ui import KnowledgeUI

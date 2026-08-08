@@ -2,6 +2,12 @@ import sys, subprocess, shutil, platform, os
 from pathlib import Path
 import argparse
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from core.app_version import APP_VERSION
+
 # CI（GitHub Actions windows runner）默认控制台编码是 cp1252，打印中文会
 # UnicodeEncodeError。强制 stdout/stderr 用 UTF-8，保证任何机器上都能输出。
 for _stream in (sys.stdout, sys.stderr):
@@ -78,32 +84,13 @@ def ensure_iscc():
     return iscc
 
 def get_version():
-    """确定安装包版本号。
-
-    优先级：
-      1. 环境变量 APP_VERSION（CI 显式指定）
-      2. git describe --tags（取最近 tag，去掉前导 v）
-      3. 兜底 "0.0.0-dev"
-    """
-    env = os.environ.get("APP_VERSION", "").strip().lstrip("v")
-    if env:
-        return env
-    try:
-        out = subprocess.check_output(
-            ["git", "describe", "--tags", "--abbrev=0"],
-            stderr=subprocess.DEVNULL,
-        )
-        ver = out.decode("utf-8", "replace").strip().lstrip("v")
-        if ver:
-            return ver
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        pass
-    return "0.0.0-dev"
+    """从项目唯一版本模块读取安装包版本号。"""
+    return APP_VERSION
 
 def build_installer():
     """调用 Inno Setup 把 dist/AgentCustomer 编译成单个 setup.exe。
 
-    通过 /DAppVersion= 把版本号传给 installer.iss（来自 git tag / APP_VERSION）。
+    通过 /DAppVersion= 把 core/app_version.py 中的版本号传给 installer.iss。
     """
     iscc = ensure_iscc()
     iss = Path("scripts") / "installer.iss"

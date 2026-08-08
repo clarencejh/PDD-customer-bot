@@ -23,6 +23,7 @@ from qfluentwidgets import (
     TitleLabel,
 )
 
+from core.app_version import DISPLAY_VERSION
 from utils.runtime_path import get_resource_path
 
 
@@ -90,10 +91,12 @@ class AboutUI(QFrame):
         title = TitleLabel("Agent-Customer")
         subtitle = BodyLabel("面向电商场景的 AI 客服桌面应用")
         subtitle.setWordWrap(True)
+        version = StrongBodyLabel(f"当前版本 {DISPLAY_VERSION}")
         meta = CaptionLabel("Python 3.11+  ·  PyQt6  ·  OpenAI 兼容 API  ·  MIT License")
         meta.setWordWrap(True)
         text_layout.addWidget(title)
         text_layout.addWidget(subtitle)
+        text_layout.addWidget(version)
         text_layout.addWidget(meta)
 
         layout.addWidget(app_icon, 0, Qt.AlignmentFlag.AlignTop)

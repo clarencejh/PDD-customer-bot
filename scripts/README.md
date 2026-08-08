@@ -152,23 +152,20 @@ python scripts/install_playwright.py
 
 ---
 
-### 4. version_info.txt - 版本信息配置
+### 4. 应用版本信息
 
 **功能描述：**
-Windows 可执行文件的版本信息配置文件，用于 PyInstaller 打包。
+应用、Python 包和 Windows 安装程序共用同一版本号来源。
 
 **包含信息：**
-- 公司名称：Agent-Customer
-- 文件描述：电商AI客服助手
-- 版本号：0.1.0.0
-- 版权信息：Copyright (C) 2025 Agent-Customer Team
-- 产品名称：Agent-Customer
+- 唯一版本文件：`core/app_version.py`
+- 关于页面显示带 `v` 前缀的版本号
+- PyInstaller 和安装程序使用数字版本号
 
 **修改方法：**
-如需修改版本信息，请编辑相应字段：
+发布新版本时只修改：
 ```python
-StringStruct(u'FileVersion', u'0.1.0.0'),  # 修改版本号
-StringStruct(u'CompanyName', u'你的公司名'),  # 修改公司名
+__version__ = "1.4.0"
 ```
 
 ---
@@ -269,7 +266,7 @@ python scripts/build_exe.py --mode debug
 ## 📝 开发者信息
 
 - **项目名称：** Agent-Customer
-- **版本：** 0.1.0
+- **版本来源：** `core/app_version.py`
 - **描述：** 电商AI客服助手
 - **主要技术栈：** Python, PyQt6, Playwright, OpenAI, LanceDB
 

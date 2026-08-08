@@ -7,7 +7,6 @@ PyInstaller spec for Agent-Customer
 import sys
 import os
 from pathlib import Path
-import tomllib
 
 block_cipher = None
 
@@ -22,11 +21,9 @@ else:
     # last fallback: 从 cwd 推导
     PROJECT_ROOT = Path.cwd()
 
-try:
-    with (PROJECT_ROOT / "pyproject.toml").open("rb") as _version_file:
-        PROJECT_VERSION = tomllib.load(_version_file)["project"]["version"]
-except (OSError, KeyError, TypeError):
-    PROJECT_VERSION = "0.0.0-dev"
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+from core.app_version import APP_VERSION as PROJECT_VERSION
 
 # ================================
 # Playwright 驱动打包

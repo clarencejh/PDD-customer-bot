@@ -13,6 +13,12 @@ import argparse
 from pathlib import Path
 import json
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from core.app_version import APP_VERSION
+
 def run_command(cmd, cwd=None):
     """运行命令并输出日志"""
     print(f"执行: {' '.join(cmd)}")
@@ -165,7 +171,7 @@ def create_installer_script(dist_path):
 ; 需要 NSIS (https://nsis.sourceforge.io/)
 
 !define APP_NAME "Agent-Customer"
-!define APP_VERSION "1.1.0"
+!define APP_VERSION "{APP_VERSION}"
 !define APP_PUBLISHER "Agent-Customer Team"
 !define APP_URL "https://github.com/your-repo/Agent-Customer"
 !define APP_EXE "AgentCustomer.exe"

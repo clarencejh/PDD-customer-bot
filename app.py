@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import QApplication
 # ============================================================================
 # 1. 配置必须最先加载
 from config import config as _app_config
+from core.app_version import APP_VERSION
 
 # 2. 数据库管理器（通过 DI 代理，懒加载）
 from database import db_manager as _app_db_manager
@@ -68,6 +69,7 @@ def main():
     # 创建应用
     app = QApplication(sys.argv)
     app.setApplicationName("Agent-Customer")
+    app.setApplicationVersion(APP_VERSION)
     # 关闭主窗口后仍由系统托盘承载应用生命周期。
     app.setQuitOnLastWindowClosed(False)
 
