@@ -40,6 +40,8 @@ class MainWindow(FluentWindow):
         self.log_view = None
         self.settingInterface = None
         self.about_view = None
+        self.help_view = None
+        self.conversation_view = None
 
         t = time.perf_counter()
         # 立即初始化导航和窗口
@@ -75,6 +77,12 @@ class MainWindow(FluentWindow):
         from ui.about_ui import AboutUI
         self.logger.info(f"  import AboutUI: {time.perf_counter()-t:.2f}s")
         t = time.perf_counter()
+        from ui.help_ui import HelpUI
+        self.logger.info(f"  import HelpUI: {time.perf_counter()-t:.2f}s")
+        t = time.perf_counter()
+        from ui.conversation_ui import ConversationUI
+        self.logger.info(f"  import ConversationUI: {time.perf_counter()-t:.2f}s")
+        t = time.perf_counter()
         self.monitor_view = AutoReplyUI(self)
         self.logger.info(f"  AutoReplyUI: {time.perf_counter()-t:.2f}s")
         t = time.perf_counter()
@@ -95,6 +103,12 @@ class MainWindow(FluentWindow):
         t = time.perf_counter()
         self.about_view = AboutUI(self)
         self.logger.info(f"  AboutUI: {time.perf_counter()-t:.2f}s")
+        t = time.perf_counter()
+        self.help_view = HelpUI(self)
+        self.logger.info(f"  HelpUI: {time.perf_counter()-t:.2f}s")
+        t = time.perf_counter()
+        self.conversation_view = ConversationUI(self)
+        self.logger.info(f"  ConversationUI: {time.perf_counter()-t:.2f}s")
 
         # 初始化导航
         self.initNavigation()
@@ -104,9 +118,13 @@ class MainWindow(FluentWindow):
     def initNavigation(self):
         self.navigationInterface.setExpandWidth(200)
         self.addSubInterface(self.monitor_view, FIF.CHAT, '自动回复')
+        self.addSubInterface(self.conversation_view, FIF.MESSAGE, '对话记录')
         self.addSubInterface(self.keyword_manager_view, FIF.EDIT, '关键词管理')
         self.addSubInterface(self.user_manager_view, FIF.PEOPLE, '账号管理')
         self.addSubInterface(self.knowledge_view, FIF.DOCUMENT, '知识库')
+        self.addSubInterface(
+            self.help_view, FIF.HELP, '帮助', NavigationItemPosition.BOTTOM
+        )
         self.addSubInterface(
             self.about_view, FIF.INFO, '关于', NavigationItemPosition.BOTTOM
         )

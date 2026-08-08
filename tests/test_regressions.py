@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -27,6 +28,7 @@ from bridge.context import (
 from utils.secret_store import protect_secret, unprotect_secret
 import utils.secret_store as secret_store
 from database.db_manager import DatabaseManager
+from database.conversation_archive import ConversationArchiveService
 from sqlalchemy import text
 from config import (
     Config,
@@ -553,6 +555,232 @@ class ConsumerRegressionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class StorageRegressionTests(unittest.TestCase):
+    def test_system_messages_join_the_only_customer_timeline(self):
+        with TemporaryDirectory() as directory:
+            manager = DatabaseManager(str(Path(directory) / "system-events.db"))
+            try:
+                service = ConversationArchiveService(manager)
+                common = {
+                    "shop_id": "shop-1",
+                    "user_id": "account-1",
+                    "username": "客服账号",
+                    "channel_type": ChannelType.PINDUODUO,
+                }
+                auth = Context.create_pinduoduo_context(
+                    content=json.dumps({
+                        "uid": "cs_shop-1_account-1",
+                        "result": "ok",
+                        "status": 1,
+                    }),
+                    user_msg_type=ContextType.AUTH,
+                    **common,
+                )
+                session_ready = Context.create_pinduoduo_context(
+                    content=json.dumps({"user_id": "customer-1"}),
+                    from_uid="4",
+                    user_msg_type=ContextType.MALL_SYSTEM_MSG,
+                    **common,
+                )
+                customer_message = Context.create_pinduoduo_context(
+                    content="你好",
+                    msg_id="customer-message-1",
+                    from_user="user",
+                    from_uid="customer-1",
+                    user_msg_type=ContextType.TEXT,
+                    **common,
+                )
+                service.archive_context(auth)
+                service.archive_context(session_ready)
+                service.archive_context(customer_message)
+
+                self.assertEqual(service.reconcile_system_records(), 1)
+                conversations = service.list_conversations(limit=20)
+                self.assertEqual(len(conversations), 1)
+                self.assertEqual(conversations[0]["customer_uid"], "customer-1")
+                timeline = service.list_records(
+                    shop_id="shop-1", customer_uid="customer-1",
+                    ascending=True, limit=20,
+                )
+                self.assertEqual(len(timeline), 3)
+                system_records = [
+                    record for record in timeline
+                    if record["sender_type"] == "system"
+                ]
+                self.assertEqual(
+                    {record["event_type"] for record in system_records},
+                    {"account_authenticated", "customer_session_ready"},
+                )
+                self.assertTrue(
+                    all(record["direction"] == "event" for record in system_records)
+                )
+                self.assertEqual(service.reconcile_system_records(), 0)
+            finally:
+                manager.dispose()
+
+    def test_transfer_target_list_excludes_current_account(self):
+        from ui.conversation_ui import _available_cs_options
+
+        options = _available_cs_options(
+            {
+                "cs_shop-1_account-1": {"username": "当前账号"},
+                "cs_shop-1_account-2": {"username": "客服二"},
+            },
+            "shop-1",
+            "account-1",
+        )
+
+        self.assertEqual(options, [("客服二 (cs_shop-1_account-2)", "cs_shop-1_account-2")])
+
+    def test_sender_archives_failed_attempt_when_transport_raises(self):
+        from bridge.sender import PinduoduoSender
+
+        with mock.patch(
+            "Channel.pinduoduo.utils.API.send_message.SendMessage"
+        ) as send_message, mock.patch(
+            "database.conversation_archive.ConversationArchiveService.archive_outbound"
+        ) as archive_outbound:
+            send_message.return_value.send_text.side_effect = RuntimeError("network")
+            with self.assertRaises(RuntimeError):
+                PinduoduoSender().send_text(
+                    "shop-1", "account-1", "customer-1", "reply", "ai"
+                )
+
+        self.assertEqual(archive_outbound.call_args.kwargs["status"], "failed")
+        self.assertEqual(archive_outbound.call_args.kwargs["sender_type"], "ai")
+
+    def test_transfer_to_ai_is_archived_as_event(self):
+        from bridge.sender import PinduoduoSender
+
+        with mock.patch(
+            "Channel.pinduoduo.utils.API.send_message.SendMessage"
+        ) as send_message, mock.patch(
+            "database.conversation_archive.ConversationArchiveService.archive_event"
+        ) as archive_event:
+            send_message.return_value.move_conversation.return_value = {"success": True}
+            result = PinduoduoSender().transfer_to_ai(
+                "shop-1", "account-1", "customer-1", "ai-1"
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(archive_event.call_args.kwargs["event_type"], "transfer_to_ai")
+        self.assertEqual(archive_event.call_args.kwargs["status"], "sent")
+
+    def test_conversation_archive_persists_timeline_and_is_idempotent(self):
+        with TemporaryDirectory() as directory:
+            manager = DatabaseManager(str(Path(directory) / "archive.db"))
+            try:
+                manager.add_shop("pinduoduo", "shop-1", "测试店铺", "")
+                manager.add_account(
+                    "pinduoduo", "shop-1", "account-1", "客服账号", "password"
+                )
+                manager.add_account(
+                    "pinduoduo", "shop-1", "account-2", "客服二", "password"
+                )
+                service = ConversationArchiveService(manager)
+                received_at = "2026-08-08T10:11:12.123Z"
+                incoming = Context.create_pinduoduo_context(
+                    content="用户问题", msg_id="platform-1", from_user="user",
+                    from_uid="customer-1", to_user="mall_cs", to_uid="cs-1",
+                    nickname="客户", timestamp=received_at, shop_id="shop-1",
+                    user_id="account-1", username="客服账号", user_msg_type=ContextType.TEXT,
+                    raw_data={"message": {"msg_id": "platform-1", "type": 0}},
+                    channel_type=ChannelType.PINDUODUO,
+                )
+                first_id = service.archive_context(incoming)
+                duplicate_id = service.archive_context(incoming)
+                self.assertIsNotNone(first_id)
+                self.assertIsNone(duplicate_id)
+
+                ai_id = service.archive_outbound(
+                    channel_name="pinduoduo", shop_id="shop-1", account_user_id="account-1",
+                    customer_uid="customer-1", content="AI 回复", message_type="text",
+                    sender_type="ai", status="sent", platform_message_id="platform-2",
+                )
+                human_id = service.archive_outbound(
+                    channel_name="pinduoduo", shop_id="shop-1", account_user_id="account-1",
+                    customer_uid="customer-1", content="人工回复", message_type="text",
+                    sender_type="human", status="failed",
+                )
+                event_id = service.archive_event(
+                    channel_name="pinduoduo", shop_id="shop-1", account_user_id="account-1",
+                    customer_uid="customer-1", event_type="transfer_to_ai", status="sent",
+                    content="转回 AI",
+                )
+                self.assertTrue(all(value is not None for value in (ai_id, human_id, event_id)))
+
+                records = service.list_records(
+                    shop_id="shop-1", account_user_id="account-1", customer_uid="customer-1",
+                    limit=20,
+                )
+                self.assertEqual(len(records), 4)
+                incoming_record = next(item for item in records if item["platform_message_id"] == "platform-1")
+                self.assertEqual(incoming_record["direction"], "inbound")
+                self.assertEqual(incoming_record["customer_uid"], "customer-1")
+                self.assertEqual(incoming_record["account_username"], "客服账号")
+                self.assertEqual(incoming_record["created_at"], "2026-08-08T10:11:12.123000")
+                self.assertEqual(incoming_record["metadata"]["message"]["msg_id"], "platform-1")
+                self.assertEqual(next(item for item in records if item["sender_type"] == "human")["status"], "failed")
+                self.assertEqual(next(item for item in records if item["event_type"] == "transfer_to_ai")["direction"], "event")
+                ai_record = next(item for item in records if item["sender_type"] == "ai")
+                self.assertEqual(ai_record["shop_name"], "测试店铺")
+                self.assertEqual(ai_record["account_username"], "客服账号")
+
+                conversations = service.list_conversations(
+                    shop_id="shop-1", search="客户", limit=20
+                )
+                self.assertEqual(len(conversations), 1)
+                self.assertEqual(conversations[0]["customer_uid"], "customer-1")
+                self.assertEqual(conversations[0]["message_count"], 4)
+                self.assertEqual(conversations[0]["event_type"], "transfer_to_ai")
+
+                timeline = service.list_records(
+                    conversation_id=conversations[0]["conversation_id"],
+                    ascending=True,
+                    limit=20,
+                )
+                self.assertEqual(timeline[0]["platform_message_id"], "platform-1")
+                self.assertEqual(timeline[-1]["event_type"], "transfer_to_ai")
+
+                service.archive_outbound(
+                    channel_name="pinduoduo", shop_id="shop-1",
+                    account_user_id="account-2", customer_uid="customer-1",
+                    content="另一客服接手", message_type="text",
+                    sender_type="human", status="sent",
+                )
+                conversations = service.list_conversations(
+                    shop_id="shop-1", search="customer-1", limit=20
+                )
+                self.assertEqual(len(conversations), 1)
+                self.assertEqual(conversations[0]["message_count"], 5)
+                combined_timeline = service.list_records(
+                    channel_name="pinduoduo", shop_id="shop-1",
+                    customer_uid="customer-1", ascending=True, limit=20,
+                )
+                self.assertEqual(
+                    {record["account_user_id"] for record in combined_timeline},
+                    {"account-1", "account-2"},
+                )
+            finally:
+                manager.dispose()
+
+    def test_human_inbound_message_uses_customer_target_for_conversation(self):
+        with TemporaryDirectory() as directory:
+            manager = DatabaseManager(str(Path(directory) / "human.db"))
+            try:
+                service = ConversationArchiveService(manager)
+                context = Context.create_pinduoduo_context(
+                    content="人工消息", msg_id="human-1", from_user="mall_cs",
+                    from_uid="cs-1", to_user="user", to_uid="customer-1",
+                    shop_id="shop-1", user_id="account-1", timestamp=datetime.now().isoformat(),
+                    user_msg_type=ContextType.MALL_CS, channel_type=ChannelType.PINDUODUO,
+                )
+                service.archive_context(context)
+                record = service.list_records(customer_uid="customer-1", limit=1)[0]
+                self.assertEqual(record["sender_type"], "human")
+                self.assertEqual(record["conversation_id"], make_conversation_key(context, "customer-1"))
+            finally:
+                manager.dispose()
+
     def test_legacy_agent_database_is_reused(self):
         from Agent.CustomerAgent.custom.session_manager import SessionManager
 

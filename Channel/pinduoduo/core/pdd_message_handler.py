@@ -80,6 +80,11 @@ class MessageHandlerMixin:
             if not context:
                 return
 
+            # Long-term archive is written before routing so unsupported,
+            # system, human and AI-bound messages share one complete timeline.
+            from database.conversation_archive import ConversationArchiveService
+            await asyncio.to_thread(ConversationArchiveService().archive_context, context)
+
             if self._should_process_immediately(context):
                 await self._handle_immediate_message(context, shop_id, user_id)
             elif self._should_queue_message(context):
@@ -134,10 +139,14 @@ class MessageHandlerMixin:
         username = username or ""
         recipient_uid = recipient_uid or ""
         try:
-            from Channel.pinduoduo.utils.API.send_message import SendMessage
+            from bridge.sender import get_sender
 
             def _send_notice():
-                SendMessage(shop_id, user_id).send_text(recipient_uid, "[玫瑰]")
+                sender = get_sender(context.channel_type)
+                if sender:
+                    sender.send_text(
+                        shop_id, user_id, recipient_uid, "[玫瑰]", "system"
+                    )
             if context.type == ContextType.AUTH:
                 auth_info = context.content
                 if isinstance(auth_info, dict):

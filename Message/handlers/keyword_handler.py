@@ -111,7 +111,10 @@ class KeywordDetectionHandler(BaseHandler):
                         self.logger.error("会话转接失败")
                 else:
                     self.logger.warning("没有其他可用的客服进行转接")
-                    await asyncio.to_thread(sender.send_text, shop_id, user_id, from_uid, "抱歉，当前没有其他客服在线，请您稍后再试。")
+                    await asyncio.to_thread(
+                        sender.send_text, shop_id, user_id, from_uid,
+                        "抱歉，当前没有其他客服在线，请您稍后再试。", "system",
+                    )
             
             return False
             

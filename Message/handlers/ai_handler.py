@@ -129,7 +129,9 @@ class AIReplyHandler(BaseHandler):
             if not sender:
                 self.logger.warning(f"无可用发送器: channel_type={context.channel_type}")
                 return False
-            result = await asyncio.to_thread(sender.send_text, shop_id, user_id, from_uid, reply)
+            result = await asyncio.to_thread(
+                sender.send_text, shop_id, user_id, from_uid, reply, "ai"
+            )
             if isinstance(result, dict) and result.get("success"):
                 return True
             return False

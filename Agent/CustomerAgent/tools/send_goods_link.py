@@ -64,7 +64,10 @@ def send_goods_link(params: SendGoodsLinkParams) -> str:
             return "发送失败：商品不属于当前店铺或已失效"
 
         sender = get_sender()
-        result = sender.send_product_card(str(params.shop_id), str(params.user_id), params.recipient_uid, params.goods_id, biz_type=2)
+        result = sender.send_product_card(
+            str(params.shop_id), str(params.user_id), params.recipient_uid,
+            params.goods_id, biz_type=2, sender_type="ai",
+        )
 
         if result and result.get("success"):
             logger.info(f"商品卡片发送成功: goods_id={params.goods_id}")

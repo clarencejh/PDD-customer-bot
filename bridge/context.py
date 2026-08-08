@@ -2,6 +2,7 @@
 上下文类型枚举和Pydantic模型定义
 """
 from enum import Enum
+from datetime import datetime
 from hashlib import sha256
 from typing import Optional, Dict, Any, Union
 from pydantic import BaseModel, Field
@@ -48,7 +49,7 @@ class PinduoduoKwargs(BaseModel):
     to_user: Optional[str] = None
     to_uid: Optional[str] = None
     nickname: Optional[str] = None
-    timestamp: Optional[str] = None
+    timestamp: Optional[Union[str, int, float, datetime]] = None
     user_msg_type: Optional[ContextType] = None
     shop_id: Optional[str] = None
     user_id: Optional[str] = None
@@ -135,7 +136,9 @@ def make_account_key(
     )
 
 
-def make_conversation_key(context: Optional[Context]) -> str:
+def make_conversation_key(
+    context: Optional[Context], customer_uid: Optional[Union[str, int]] = None
+) -> str:
     """Build an identity-safe conversation key.
 
     ``from_uid`` is the customer identity and must be part of the key; using
@@ -146,7 +149,11 @@ def make_conversation_key(context: Optional[Context]) -> str:
         _context_value(context, "shop_id", "unknown"),
         _context_value(context, "user_id", "unknown"),
     )
-    customer_id = _context_value(context, "from_uid", "unknown")
+    customer_id = (
+        str(customer_uid)
+        if customer_uid is not None
+        else _context_value(context, "from_uid", "unknown")
+    )
     raw = f"{account_key}|customer|{customer_id}"
     return f"conversation_{sha256(raw.encode('utf-8')).hexdigest()}"
 
@@ -175,4 +182,3 @@ def context_scope(context: Optional[Context]) -> Dict[str, str]:
         "account_key": make_account_key(channel, shop_id, user_id),
         "conversation_key": make_conversation_key(context),
     }
-

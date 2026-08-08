@@ -39,6 +39,7 @@ class DatabaseManager:
         # 创建表结构
         Base.metadata.create_all(self.engine)
         self._ensure_account_identity_column()
+        self._ensure_conversation_archive_columns()
 
         self.logger = get_logger()
         # 初始化数据库
@@ -60,6 +61,28 @@ class DatabaseManager:
             if "is_main_account" not in columns:
                 connection.exec_driver_sql(
                     "ALTER TABLE accounts ADD COLUMN is_main_account BOOLEAN"
+                )
+
+    def _ensure_conversation_archive_columns(self) -> None:
+        """Upgrade conversation archives created by an earlier app build."""
+        with self.engine.begin() as connection:
+            tables = {
+                row[0]
+                for row in connection.exec_driver_sql(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            if "conversation_records" not in tables:
+                return
+            columns = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info(conversation_records)"
+                )
+            }
+            if "shop_name" not in columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE conversation_records ADD COLUMN shop_name VARCHAR(100)"
                 )
 
 

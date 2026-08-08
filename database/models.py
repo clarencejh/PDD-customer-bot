@@ -10,6 +10,8 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    JSON,
+    Index,
     UniqueConstraint,
 )
 from sqlalchemy.orm import declarative_base, relationship
@@ -125,3 +127,51 @@ class CustomerServiceKnowledge(Base):
 
     def __repr__(self):
         return f"<CustomerServiceKnowledge(title='{self.title}', enabled={self.enabled})>"
+
+
+class ConversationRecord(Base):
+    """Long-lived chat archive, separate from the compressed agent context."""
+    __tablename__ = "conversation_records"
+    __table_args__ = (
+        Index("ix_conversation_records_scope_time", "shop_id", "account_user_id", "customer_uid", "created_at"),
+        Index("ix_conversation_records_platform_message", "platform_message_id"),
+        UniqueConstraint(
+            "channel_name", "shop_id", "account_user_id",
+            "platform_message_id", "direction",
+            name="uix_conversation_record_platform_message",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    conversation_id = Column(String(255), nullable=False, index=True)
+    channel_name = Column(String(50), nullable=False, default="pinduoduo")
+    shop_id = Column(String(100), nullable=False)
+    shop_name = Column(String(100), nullable=True)
+    account_user_id = Column(String(100), nullable=False)
+    account_username = Column(String(100), nullable=True)
+    customer_uid = Column(String(100), nullable=False)
+    customer_nickname = Column(String(255), nullable=True)
+    direction = Column(String(16), nullable=False)  # inbound | outbound | event
+    sender_type = Column(String(16), nullable=False)  # user | ai | human | system
+    event_type = Column(String(32), nullable=False, default="message")
+    content = Column(Text, nullable=True)
+    platform_message_id = Column(String(255), nullable=True)
+    message_type = Column(String(64), nullable=True)
+    status = Column(String(32), nullable=False, default="received")  # received|sent|failed
+    metadata_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.now, nullable=False, index=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id, "conversation_id": self.conversation_id,
+            "channel_name": self.channel_name, "shop_id": self.shop_id,
+            "shop_name": self.shop_name,
+            "account_user_id": self.account_user_id, "account_username": self.account_username,
+            "customer_uid": self.customer_uid, "customer_nickname": self.customer_nickname,
+            "direction": self.direction, "sender_type": self.sender_type,
+            "event_type": self.event_type, "content": self.content,
+            "platform_message_id": self.platform_message_id,
+            "message_type": self.message_type, "status": self.status,
+            "metadata": self.metadata_json,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
