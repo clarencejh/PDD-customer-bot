@@ -577,7 +577,7 @@ class StartupServiceRegressionTests(unittest.TestCase):
 
         self.assertEqual(
             service.launch_arguments(),
-            ["/usr/bin/python3", "/tmp/Customer Agent/app.py"],
+            [str(service.executable), str(service.app_script)],
         )
 
     def test_unsupported_platform_is_rejected(self):
