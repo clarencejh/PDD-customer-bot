@@ -814,6 +814,26 @@ class KnowledgeImportRegressionTests(unittest.TestCase):
         self.assertEqual(rows[0]["tags"], "物流,发货")
 
 
+class LogExportRegressionTests(unittest.TestCase):
+    def test_export_worker_writes_utf8_csv(self):
+        from ui.log_ui import LogExportWorker
+
+        rows = [{
+            "timestamp": "2026-08-08 12:00:00",
+            "level": "INFO",
+            "module": "test",
+            "file_info": "test.py:1",
+            "message": "导出成功",
+        }]
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "logs.csv"
+            worker = LogExportWorker(str(path), "csv", rows)
+            worker.run()
+
+            self.assertTrue(path.read_bytes().startswith(b"\xef\xbb\xbf"))
+            self.assertIn("导出成功", path.read_text(encoding="utf-8-sig"))
+
+
 class ToolScopeRegressionTests(unittest.TestCase):
     def test_authoritative_identity_fields_override_llm_arguments(self):
         class Params(BaseModel):

@@ -23,6 +23,45 @@ from qfluentwidgets import (CardWidget, SubtitleLabel, CaptionLabel, BodyLabel,
 from utils.logger_loguru import get_logger, logger, UILogHandler
 
 
+class LogExportWorker(QThread):
+    """将日志写入磁盘，避免大批量导出阻塞 GUI。"""
+
+    export_finished = pyqtSignal(bool, str)
+
+    def __init__(self, file_path: str, export_format: str, rows: list[dict], parent=None):
+        super().__init__(parent)
+        self.file_path = file_path
+        self.export_format = export_format
+        self.rows = rows
+
+    def run(self):
+        try:
+            if self.export_format == "json":
+                import json
+                with open(self.file_path, "w", encoding="utf-8") as file:
+                    json.dump(self.rows, file, ensure_ascii=False, indent=2)
+            elif self.export_format == "csv":
+                import csv
+                with open(self.file_path, "w", newline="", encoding="utf-8-sig") as file:
+                    writer = csv.writer(file)
+                    writer.writerow(["时间", "级别", "模块", "文件", "消息"])
+                    for row in self.rows:
+                        writer.writerow([
+                            row["timestamp"], row["level"], row["module"],
+                            row["file_info"], row["message"],
+                        ])
+            else:
+                with open(self.file_path, "w", encoding="utf-8") as file:
+                    for row in self.rows:
+                        file.write(
+                            f'{row["timestamp"]} | {row["level"]:8} | '
+                            f'{row["file_info"]} - {row["message"]}\n'
+                        )
+            self.export_finished.emit(True, self.file_path)
+        except Exception as exc:
+            self.export_finished.emit(False, str(exc))
+
+
 class LogHandler:
     """兼容性LogHandler类 - 实际使用UILogHandler"""
 
@@ -574,6 +613,7 @@ class LogUI(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.logger = get_logger()
+        self.export_worker = None
 
         # 设置对象名（用于导航）
         self.setObjectName('log-ui')
@@ -709,25 +749,38 @@ class LogUI(QFrame):
         )
 
         if file_path:
-            try:
-                if format == "json":
-                    self._export_json(file_path)
-                elif format == "csv":
-                    self._export_csv(file_path)
-                else:
-                    self._export_txt(file_path)
+            model = self.log_display.log_table.model()
+            rows = [
+                {
+                    "timestamp": item.timestamp,
+                    "level": item.level,
+                    "module": item.module,
+                    "message": item.message,
+                    "file_info": item.file_info,
+                }
+                for item in model._filtered_logs
+            ]
+            self.control_widget.export_btn.setEnabled(False)
+            self.export_worker = LogExportWorker(file_path, format, rows, self)
+            self.export_worker.export_finished.connect(self._on_export_finished)
+            self.export_worker.finished.connect(self.export_worker.deleteLater)
+            self.export_worker.start()
 
-                InfoBar.success(
-                    title="导出成功",
-                    content=f"日志已导出到: {file_path}",
-                    orient=Qt.Orientation.Horizontal,
-                    isClosable=True,
-                    position=InfoBarPosition.TOP,
-                    duration=3000,
-                    parent=self
-                )
-            except Exception as e:
-                QMessageBox.critical(self, "导出失败", f"导出日志失败：{str(e)}")
+    def _on_export_finished(self, success: bool, message: str):
+        self.export_worker = None
+        self.control_widget.export_btn.setEnabled(True)
+        if not success:
+            QMessageBox.critical(self, "导出失败", f"导出日志失败：{message}")
+            return
+        InfoBar.success(
+            title="导出成功",
+            content=f"日志已导出到: {message}",
+            orient=Qt.Orientation.Horizontal,
+            isClosable=True,
+            position=InfoBarPosition.TOP,
+            duration=3000,
+            parent=self,
+        )
 
     def _export_txt(self, file_path: str):
         """导出为TXT格式"""
@@ -781,4 +834,4 @@ class LogUI(QFrame):
         """关闭事件"""
         # 从logger.py的logger中移除日志处理器
         self.ui_log_manager.remove_handler(self.log_handler)
-        super().closeEvent(event) 
+        super().closeEvent(event)
