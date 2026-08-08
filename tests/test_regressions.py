@@ -407,6 +407,29 @@ class AutoReplyLLMGuardRegressionTests(unittest.IsolatedAsyncioTestCase):
                 await agent.async_reply("你好", _context("customer-1"))
 
 
+class OperationsUIStateRegressionTests(unittest.TestCase):
+    def test_platform_status_is_distinct_from_auto_reply_status(self):
+        from ui.auto_reply.ui import OperationsUI
+
+        self.assertEqual(OperationsUI.platform_status({"status": 1}), "在线")
+        self.assertEqual(OperationsUI.platform_status({"status": 3}), "离线")
+        self.assertEqual(OperationsUI.platform_status({"status": None}), "未验证")
+
+    def test_operations_page_uses_immutable_account_identity(self):
+        from ui.auto_reply.ui import OperationsUI
+
+        first = {
+            "channel_name": "pinduoduo",
+            "shop_id": "shop-1",
+            "user_id": "account-1",
+            "username": "same-name",
+        }
+        second = {**first, "user_id": "account-2"}
+        self.assertNotEqual(
+            OperationsUI.account_key(first), OperationsUI.account_key(second)
+        )
+
+
 class ToolScopeRegressionTests(unittest.TestCase):
     def test_authoritative_identity_fields_override_llm_arguments(self):
         class Params(BaseModel):

@@ -1,649 +1,626 @@
-# 自动回复主界面模块
+"""店铺运营工作台。
+
+账号管理和自动回复共享同一张高密度列表，避免操作员在两个页面间切换。
+旧的 ``AutoReplyUI`` 名称保留为兼容别名，运行时状态仍由原管理器负责。
+"""
+
+from collections import defaultdict
+from typing import Any, Optional
+
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtWidgets import QFrame, QWidget, QMessageBox
-from PyQt6.QtGui import QFont
-from qfluentwidgets import (SubtitleLabel, CaptionLabel, PushButton, PrimaryPushButton,
-                            ScrollArea, FluentIcon as FIF)
-from utils.logger_loguru import get_logger
+from PyQt6.QtWidgets import (
+    QAbstractItemView,
+    QDialog,
+    QFrame,
+    QHBoxLayout,
+    QHeaderView,
+    QMenu,
+    QMessageBox,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+from qfluentwidgets import (
+    CaptionLabel,
+    CheckBox,
+    ComboBox,
+    FluentIcon as FIF,
+    LineEdit,
+    PrimaryPushButton,
+    PushButton,
+    SubtitleLabel,
+    TableWidget,
+)
+
 from service.account_service import account_service
 from service.llm_service import validate_llm_config
-from .card import AutoReplyCard
+from utils.logger_loguru import get_logger
 from .manager import auto_reply_manager
-from .threads import AccountIdentityThread, LLMPreflightThread, SetStatusThread
+from .threads import AccountIdentityThread, LLMPreflightThread
 
 
-class AutoReplyUI(QFrame):
-    """自动回复主界面"""
+class OperationsUI(QFrame):
+    """店铺、账号和自动回复的统一运营页面。"""
+
+    COLUMN_COUNT = 9
 
     def __init__(self, parent=None):
         super().__init__(parent=parent)
-        self.logger = get_logger()
-        self.accounts_data = []
+        self.logger = get_logger("OperationsUI")
+        self.accounts_data: list[dict[str, Any]] = []
         self._loaded_once = False
-        self.llm_preflight_thread = None
-        self.identity_thread = None
         self._identity_refresh_attempted = False
-        self._pending_start_accounts = []
-        self._pending_single_start = False
-        self._reported_ai_failures = set()
-        self.setupUI()
-        QTimer.singleShot(300, self._maybeLoadOnShow)
+        self.identity_thread = None
+        self._selected_keys: set[str] = set()
+        self._pending_start_accounts: list[dict[str, Any]] = []
+        self.llm_preflight_thread = None
+        self._reported_ai_failures: set[str] = set()
+        self._build_ui()
 
-        self.stats_timer = QTimer()
-        self.stats_timer.timeout.connect(self.updateStats)
+        self.stats_timer = QTimer(self)
+        self.stats_timer.timeout.connect(self.refresh_runtime_state)
         self.stats_timer.start(5000)
-
-        self.sync_timer = QTimer()
-        self.sync_timer.timeout.connect(self._sync_auto_reply_status)
+        self.sync_timer = QTimer(self)
+        self.sync_timer.timeout.connect(self.refresh_runtime_state)
         self.sync_timer.start(10000)
+        QTimer.singleShot(300, self._maybe_load)
 
-    def closeEvent(self, event):
-        """窗口关闭时清理定时器"""
-        try:
-            if hasattr(self, 'stats_timer'):
-                self.stats_timer.stop()
-            if hasattr(self, 'sync_timer'):
-                self.sync_timer.stop()
-            event.accept()
-        except Exception as e:
-            self.logger.error(f"清理定时器失败: error_type={type(e).__name__}")
-            event.accept()
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(30, 30, 30, 30)
+        layout.setSpacing(18)
 
-    def showEvent(self, event):
-        super().showEvent(event)
-        self._maybeLoadOnShow()
-
-    def _maybeLoadOnShow(self):
-        if not self._loaded_once and self.isVisible():
-            self._loaded_once = True
-            self.loadAccountsFromDB()
-
-    def setupUI(self):
-        """设置主界面UI"""
-        from PyQt6.QtWidgets import QVBoxLayout, QHBoxLayout
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(30, 30, 30, 30)
-        main_layout.setSpacing(25)
-
-        header_widget = self.createHeaderWidget()
-        content_widget = self.createContentWidget()
-
-        self.refresh_btn.clicked.connect(self.reloadAccounts)
-        self.start_all_btn.clicked.connect(self.onStartAllAutoReply)
-        self.stop_all_btn.clicked.connect(self.stopAllAutoReply)
-
-        main_layout.addWidget(header_widget)
-        main_layout.addWidget(content_widget, 1)
-        self.setObjectName("自动回复")
-
-    def createHeaderWidget(self):
-        """创建头部区域"""
-        from PyQt6.QtWidgets import QVBoxLayout, QHBoxLayout
-        header_widget = QWidget()
-        header_layout = QHBoxLayout(header_widget)
-        header_layout.setContentsMargins(0, 0, 0, 0)
-        header_layout.setSpacing(20)
-
-        title_label = SubtitleLabel("自动回复管理")
-        self.stats_label = CaptionLabel("共 0 个账号")
-        self.running_stats_label = CaptionLabel("运行中: 0 个")
-        self.running_stats_label.setStyleSheet("color: #28a745; font-weight: bold;")
-
-        title_area = QWidget()
-        title_layout = QVBoxLayout(title_area)
-        title_layout.setContentsMargins(0, 0, 0, 0)
-        title_layout.setSpacing(5)
-        title_layout.addWidget(title_label)
-        title_layout.addWidget(self.stats_label)
-        title_layout.addWidget(self.running_stats_label)
+        title_row = QHBoxLayout()
+        title_area = QVBoxLayout()
+        title_area.setSpacing(3)
+        title_area.addWidget(SubtitleLabel("店铺运营"))
+        self.summary_label = CaptionLabel("加载中")
+        self.summary_label.setStyleSheet("color: #667085;")
+        title_area.addWidget(self.summary_label)
+        title_row.addLayout(title_area)
+        title_row.addStretch()
 
         self.refresh_btn = PushButton("刷新")
         self.refresh_btn.setIcon(FIF.UPDATE)
-        self.refresh_btn.setFixedSize(80, 40)
-
-        self.start_all_btn = PrimaryPushButton("开始所有")
+        self.refresh_btn.clicked.connect(self.load_accounts)
+        self.add_btn = PrimaryPushButton("添加账号")
+        self.add_btn.setIcon(FIF.ADD)
+        self.add_btn.clicked.connect(self.add_account)
+        self.start_all_btn = PushButton("批量启动")
         self.start_all_btn.setIcon(FIF.PLAY_SOLID)
-        self.start_all_btn.setFixedSize(120, 40)
-
-        self.stop_all_btn = PushButton("停止所有")
+        self.start_all_btn.clicked.connect(self.start_selected)
+        self.stop_all_btn = PushButton("批量停止")
         self.stop_all_btn.setIcon(FIF.CANCEL)
+        self.stop_all_btn.clicked.connect(self.stop_selected)
+        self.refresh_btn.setFixedSize(90, 40)
+        self.add_btn.setFixedSize(120, 40)
+        self.start_all_btn.setFixedSize(120, 40)
         self.stop_all_btn.setFixedSize(120, 40)
+        for button in (self.refresh_btn, self.add_btn, self.start_all_btn, self.stop_all_btn):
+            title_row.addWidget(button)
+        layout.addLayout(title_row)
 
-        buttons_widget = QWidget()
-        buttons_layout = QHBoxLayout(buttons_widget)
-        buttons_layout.setContentsMargins(0, 0, 0, 0)
-        buttons_layout.setSpacing(10)
-        buttons_layout.addWidget(self.refresh_btn)
-        buttons_layout.addWidget(self.start_all_btn)
-        buttons_layout.addWidget(self.stop_all_btn)
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(10)
+        self.shop_filter = ComboBox()
+        self.shop_filter.setFixedWidth(210)
+        self.shop_filter.currentIndexChanged.connect(self.refresh_table)
+        self.platform_filter = ComboBox()
+        self.platform_filter.setFixedWidth(140)
+        self.platform_filter.addItems(["全部平台状态", "在线", "离线", "未验证", "休息"])
+        self.platform_filter.currentIndexChanged.connect(self.refresh_table)
+        self.reply_filter = ComboBox()
+        self.reply_filter.setFixedWidth(140)
+        self.reply_filter.addItems(["全部回复状态", "运行中", "未启动", "连接中", "异常"])
+        self.reply_filter.currentIndexChanged.connect(self.refresh_table)
+        self.search_edit = LineEdit()
+        self.search_edit.setPlaceholderText("搜索店铺、账号或用户 ID")
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.setMinimumWidth(240)
+        self.search_edit.textChanged.connect(self.refresh_table)
+        self.only_error = CheckBox("仅看异常")
+        self.only_error.stateChanged.connect(self.refresh_table)
+        self.select_all_btn = PushButton("全选")
+        self.select_all_btn.setIcon(FIF.CHECKBOX)
+        self.select_all_btn.setFixedSize(100, 34)
+        self.select_all_btn.clicked.connect(self.toggle_select_all)
+        filter_row.addWidget(self.shop_filter)
+        filter_row.addWidget(self.platform_filter)
+        filter_row.addWidget(self.reply_filter)
+        filter_row.addWidget(self.search_edit, 1)
+        filter_row.addWidget(self.only_error)
+        filter_row.addWidget(self.select_all_btn)
+        layout.addLayout(filter_row)
 
-        header_layout.addWidget(title_area)
-        header_layout.addStretch()
-        header_layout.addWidget(buttons_widget)
+        self.table = TableWidget(self)
+        self.table.setRowCount(0)
+        self.table.setColumnCount(self.COLUMN_COUNT)
+        self.table.setHorizontalHeaderLabels(
+            ["选择", "店铺 / 账号", "身份", "平台状态", "自动回复", "最近心跳", "今日消息", "健康", "操作"]
+        )
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setShowGrid(False)
+        self.table.verticalHeader().setDefaultSectionSize(48)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(0, 48)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        column_widths = {2: 100, 3: 100, 4: 104, 5: 90, 6: 78, 7: 112, 8: 188}
+        for column, width in column_widths.items():
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
+            self.table.setColumnWidth(column, width)
+        self.table.itemChanged.connect(self._on_item_changed_once)
+        layout.addWidget(self.table, 1)
+        self.setObjectName("店铺运营")
 
-        return header_widget
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._maybe_load()
 
-    def createContentWidget(self):
-        """创建内容区域"""
-        from PyQt6.QtWidgets import QVBoxLayout
-        content_widget = QWidget()
-        content_layout = QVBoxLayout(content_widget)
-        content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(0)
-        content_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+    def closeEvent(self, event):
+        self.stats_timer.stop()
+        self.sync_timer.stop()
+        event.accept()
 
-        self.scroll_area = ScrollArea()
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.scroll_area.setStyleSheet("""
-            ScrollArea {
-                border: none;
-                background-color: transparent;
-            }
-        """)
+    def _maybe_load(self):
+        if not self._loaded_once and self.isVisible():
+            self._loaded_once = True
+            self.load_accounts()
 
-        self.accounts_container = QWidget()
-        self.accounts_layout = QVBoxLayout(self.accounts_container)
-        self.accounts_layout.setSpacing(15)
-        self.accounts_layout.setContentsMargins(20, 20, 20, 20)
-        self.accounts_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+    @staticmethod
+    def account_key(account: dict) -> str:
+        return auto_reply_manager._account_key(account)
 
-        self.accounts_container.setStyleSheet("""
-            QWidget {
-                background-color: transparent;
-                border: none;
-            }
-        """)
+    @staticmethod
+    def platform_status(account: dict) -> str:
+        return {1: "在线", 3: "离线", 0: "休息", None: "未验证"}.get(account.get("status"), "未知")
 
-        self.scroll_area.setWidget(self.accounts_container)
-        content_layout.addWidget(self.scroll_area)
+    def reply_status(self, account: dict) -> str:
+        key = self.account_key(account)
+        thread = auto_reply_manager.running_accounts.get(key)
+        if key in auto_reply_manager.connected_accounts:
+            return "运行中"
+        if thread is not None and hasattr(thread, "isRunning") and thread.isRunning():
+            return "连接中"
+        if account.get("last_error"):
+            return "异常"
+        return "未启动"
 
-        return content_widget
+    def health_status(self, account: dict, reply_status: str) -> str:
+        if reply_status == "异常" or self.platform_status(account) in {"离线", "未验证"}:
+            return "需关注"
+        if reply_status == "连接中":
+            return "处理中"
+        return "正常"
 
+    def load_accounts(self):
+        try:
+            self.accounts_data = account_service.get_all_accounts_with_details() or []
+            for account in self.accounts_data:
+                account.setdefault("last_error", "")
+            valid_keys = {self.account_key(account) for account in self.accounts_data}
+            self._selected_keys.intersection_update(valid_keys)
+            self._populate_shop_filter()
+            self.refresh_table()
+            self._refresh_unknown_identities()
+        except Exception as exc:
+            self.logger.error(f"加载店铺运营数据失败: error_type={type(exc).__name__}")
+            self.summary_label.setText("加载失败，请刷新重试")
+
+    # 兼容旧页面公开方法，避免外部调用方随导航合并一起失效。
     def loadAccountsFromDB(self):
-        """从数据库加载账号数据"""
-        try:
-            self.accounts_data.clear()
-
-            # 使用批量查询一次性获取所有账号数据，减少N+1查询
-            all_accounts = account_service.get_all_accounts_with_details()
-            self.accounts_data.extend(all_accounts)
-
-            self.refreshAccountList()
-            self._refresh_unknown_account_identities()
-
-        except Exception as e:
-            self.logger.error(f"加载账号数据失败: error_type={type(e).__name__}")
-
-    def _refresh_unknown_account_identities(self):
-        """Resolve legacy account identities once without blocking the UI."""
-        if self._identity_refresh_attempted:
-            return
-        unknown_accounts = [
-            account
-            for account in self.accounts_data
-            if account.get("is_main_account") is None and account.get("cookies")
-        ]
-        if not unknown_accounts:
-            return
-        self._identity_refresh_attempted = True
-        thread = AccountIdentityThread(unknown_accounts, self)
-        self.identity_thread = thread
-        thread.identities_updated.connect(self._on_account_identities_updated)
-        thread.finished.connect(thread.deleteLater)
-        thread.start()
-
-    def _on_account_identities_updated(self, updated_count: int):
-        self.identity_thread = None
-        if updated_count:
-            self.loadAccountsFromDB()
-
-    def refreshAccountList(self):
-        """刷新账号列表"""
-        self.clearAccountList()
-
-        for account_data in self.accounts_data:
-            account_card = AutoReplyCard(account_data)
-
-            account_card.online_clicked.connect(self.onAccountOnline)
-            account_card.offline_clicked.connect(self.onAccountOffline)
-            account_card.auto_reply_clicked.connect(self.onAutoReplyToggle)
-
-            is_connected = auto_reply_manager.is_connected(account_data)
-            self.logger.debug(f"账号 {account_data['username']} 状态检查: connected={is_connected}")
-            account_card.setAutoReplyStatus(is_connected)
-
-            self.accounts_layout.addWidget(account_card)
-
-        self.accounts_layout.addStretch()
-        self.updateStats()
-        QTimer.singleShot(2000, self._sync_auto_reply_status)
-
-    def clearAccountList(self):
-        """清空账号列表"""
-        while self.accounts_layout.count():
-            child = self.accounts_layout.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
-
-    def updateStats(self):
-        """更新统计信息"""
-        count = len(self.accounts_data)
-        running_count = auto_reply_manager.get_connected_count()
-        self.stats_label.setText(f"共 {count} 个账号")
-        self.running_stats_label.setText(f"运行中: {running_count} 个")
-
-    def _sync_auto_reply_status(self):
-        """同步自动回复状态"""
-        try:
-            updated_count = 0
-
-            for i in range(self.accounts_layout.count() - 1):
-                widget = self.accounts_layout.itemAt(i).widget()
-                if isinstance(widget, AutoReplyCard):
-                    is_running = auto_reply_manager.is_connected(widget.account_data)
-                    current_status = widget.auto_reply_status
-
-                    if widget.auto_reply_pending:
-                        continue
-
-                    if is_running != current_status:
-                        if current_status and not is_running:
-                            account_key = "_".join(
-                                str(widget.account_data.get(key, ""))
-                                for key in ("channel_name", "shop_id", "user_id")
-                            )
-                            if account_key in auto_reply_manager.running_accounts:
-                                thread = auto_reply_manager.running_accounts[account_key]
-                                if hasattr(thread, 'isRunning') and thread.isRunning():
-                                    continue
-
-                        self.logger.info(f"同步状态: {widget.account_data['username']} 从 {current_status} 更新为 {is_running}")
-                        widget.setAutoReplyStatus(is_running)
-                        updated_count += 1
-
-            if updated_count > 0:
-                self.logger.info(f"状态同步完成，更新了 {updated_count} 个账号的状态")
-                self.updateStats()
-
-        except Exception as e:
-            self.logger.error(f"同步自动回复状态失败: error_type={type(e).__name__}")
+        self.load_accounts()
 
     def reloadAccounts(self):
-        """重新加载账号"""
-        self.loadAccountsFromDB()
+        self.load_accounts()
+
+    def updateStats(self):
+        self.summary_label.setText(self._summary_text())
 
     def onStartAllAutoReply(self):
-        """开始所有符合条件的账号的自动回复"""
-        try:
-            not_eligible_count = sum(
-                1
-                for acc_data in self.accounts_data
-                if acc_data.get("status") != 1 or auto_reply_manager.is_running(acc_data)
-            )
-            eligible_accounts = [
-                acc_data for acc_data in self.accounts_data
-                if acc_data.get("status") == 1 and not auto_reply_manager.is_running(acc_data)
-            ]
-
-            if not eligible_accounts:
-                QMessageBox.information(self, "提示", "没有符合条件的账号可以启动自动回复。\n\n(需要账号状态为'在线'且当前未在回复中)")
-                return
-
-            reply = QMessageBox.question(
-                self,
-                "确认开始",
-                f"找到 {len(eligible_accounts)} 个在线且未运行的账号。"
-                f"{f'另有 {not_eligible_count} 个账号因未上线或已运行而跳过。' if not_eligible_count else ''}"
-                "\n确定要开始这些账号的自动回复吗？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No
-            )
-
-            if reply == QMessageBox.StandardButton.No:
-                return
-            self._run_llm_preflight(eligible_accounts, single_start=False)
-
-        except Exception as e:
-            self.logger.error(f"开始所有自动回复失败: error_type={type(e).__name__}")
-            QMessageBox.critical(self, "错误", "开始所有自动回复失败，请稍后重试")
+        self.start_selected()
 
     def stopAllAutoReply(self):
-        """停止所有自动回复"""
-        try:
-            running_count = auto_reply_manager.get_running_count()
+        self.stop_selected()
 
-            if running_count == 0:
-                QMessageBox.information(self, "提示", "当前没有正在运行的自动回复")
-                return
+    def _refresh_unknown_identities(self):
+        if self._identity_refresh_attempted:
+            return
+        unknown = [
+            account for account in self.accounts_data
+            if account.get("is_main_account") is None and account.get("cookies")
+        ]
+        if not unknown:
+            return
+        self._identity_refresh_attempted = True
+        self.identity_thread = AccountIdentityThread(unknown, self)
+        self.identity_thread.identities_updated.connect(
+            lambda count: self.load_accounts() if count else None
+        )
+        self.identity_thread.finished.connect(self.identity_thread.deleteLater)
+        self.identity_thread.start()
 
-            reply = QMessageBox.question(
-                self,
-                "确认停止",
-                f"确定要停止所有 {running_count} 个正在运行的自动回复吗？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No
-            )
+    def _populate_shop_filter(self):
+        current = self.shop_filter.currentData()
+        self.shop_filter.blockSignals(True)
+        self.shop_filter.clear()
+        self.shop_filter.addItem("全部店铺")
+        self.shop_filter.setItemData(0, "")
+        shops = {}
+        for account in self.accounts_data:
+            shops[(account.get("channel_name", ""), account.get("shop_id", ""))] = account.get("shop_name") or account.get("shop_id", "")
+        for (channel, shop_id), shop_name in sorted(shops.items(), key=lambda item: item[1]):
+            index = self.shop_filter.count()
+            self.shop_filter.addItem(f"{shop_name} · {shop_id}")
+            self.shop_filter.setItemData(index, f"{channel}|{shop_id}")
+        if current:
+            index = self.shop_filter.findData(current)
+            self.shop_filter.setCurrentIndex(max(index, 0))
+        self.shop_filter.blockSignals(False)
 
-            if reply == QMessageBox.StandardButton.Yes:
-                auto_reply_manager.stop_all()
-                self._update_all_cards_auto_reply_status()
-                self.updateStats()
-                QMessageBox.information(self, "成功", "已停止所有自动回复")
+    def _filtered_accounts(self):
+        query = self.search_edit.text().strip().lower()
+        shop_scope = self.shop_filter.currentData() or ""
+        platform_scope = self.platform_filter.currentText()
+        reply_scope = self.reply_filter.currentText()
+        only_error = self.only_error.isChecked()
+        visible = []
+        for account in self.accounts_data:
+            platform = self.platform_status(account)
+            reply = self.reply_status(account)
+            health = self.health_status(account, reply)
+            if shop_scope and f"{account.get('channel_name')}|{account.get('shop_id')}" != shop_scope:
+                continue
+            if platform_scope not in {"全部平台状态", platform}:
+                continue
+            if reply_scope not in {"全部回复状态", reply}:
+                continue
+            if only_error and health == "正常":
+                continue
+            haystack = " ".join(str(account.get(key, "")) for key in ("shop_name", "shop_id", "username", "user_id")).lower()
+            if query and query not in haystack:
+                continue
+            visible.append(account)
+        return visible
 
-        except Exception as e:
-            self.logger.error(f"停止所有自动回复失败: error_type={type(e).__name__}")
-            QMessageBox.critical(self, "错误", "停止所有自动回复失败，请稍后重试")
+    def refresh_table(self, *_args):
+        selected = set(self._selected_keys)
+        self.table.setRowCount(0)
+        grouped = defaultdict(list)
+        for account in self._filtered_accounts():
+            grouped[(account.get("channel_name", ""), account.get("shop_id", ""))].append(account)
+        row = 0
+        for (channel, shop_id), accounts in sorted(grouped.items(), key=lambda item: item[1][0].get("shop_name", "")):
+            shop_name = accounts[0].get("shop_name") or shop_id
+            running = sum(self.reply_status(account) == "运行中" for account in accounts)
+            errors = sum(self.health_status(account, self.reply_status(account)) != "正常" for account in accounts)
+            self.table.insertRow(row)
+            self._set_item(row, 0, "", enabled=False)
+            self._set_item(row, 1, f"{shop_name}  ·  {shop_id}", bold=True)
+            self._set_item(row, 2, f"{len(accounts)} 个账号")
+            self._set_item(row, 3, "店铺汇总")
+            self._set_item(row, 4, f"{running}/{len(accounts)} 运行")
+            self._set_item(row, 5, "--")
+            self._set_item(row, 6, "--")
+            self._set_item(row, 7, f"{errors} 个需关注" if errors else "正常")
+            self._set_action(row, None, shop_scope=(channel, shop_id))
+            self.table.setRowHeight(row, 34)
+            row += 1
+            for account in accounts:
+                self.table.insertRow(row)
+                key = self.account_key(account)
+                checkbox = QTableWidgetItem()
+                checkbox.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+                checkbox.setCheckState(Qt.CheckState.Checked if key in selected else Qt.CheckState.Unchecked)
+                checkbox.setData(Qt.ItemDataRole.UserRole, key)
+                self.table.setItem(row, 0, checkbox)
+                self._set_item(row, 1, f"    {account.get('username', '')}\n    {account.get('user_id', '')}")
+                self._set_item(row, 2, self._identity_text(account.get("is_main_account")))
+                self._set_item(row, 3, self.platform_status(account))
+                reply = self.reply_status(account)
+                self._set_item(row, 4, reply)
+                self._set_item(row, 5, "已连接" if reply == "运行中" else "--")
+                self._set_item(row, 6, "--")
+                self._set_item(row, 7, self.health_status(account, reply))
+                self._set_action(row, account)
+                self.table.setRowHeight(row, 48)
+                row += 1
+        if not grouped:
+            self.table.insertRow(0)
+            message = "暂无账号，点击右上角“添加账号”开始接入。" if not self.accounts_data else "没有符合当前筛选条件的账号。"
+            self._set_item(0, 1, message)
+            self.table.setSpan(0, 1, 1, self.COLUMN_COUNT - 1)
+            self.table.setRowHeight(0, 52)
+        has_selection = bool(self._selected_accounts())
+        self.start_all_btn.setEnabled(has_selection)
+        self.stop_all_btn.setEnabled(has_selection)
+        self._sync_select_all_button()
+        self.summary_label.setText(self._summary_text())
 
-    def _update_all_cards_auto_reply_status(self):
-        """更新所有卡片的自动回复状态"""
-        try:
-            for i in range(self.accounts_layout.count() - 1):
-                widget = self.accounts_layout.itemAt(i).widget()
-                if isinstance(widget, AutoReplyCard):
-                    is_running = auto_reply_manager.is_connected(widget.account_data)
-                    widget.setAutoReplyStatus(is_running)
+    def _on_item_changed_once(self, item):
+        if item.column() != 0:
+            return
+        key = item.data(Qt.ItemDataRole.UserRole)
+        if not key:
+            return
+        if item.checkState() == Qt.CheckState.Checked:
+            self._selected_keys.add(key)
+        else:
+            self._selected_keys.discard(key)
+        enabled = bool(self._selected_accounts())
+        self.start_all_btn.setEnabled(enabled)
+        self.stop_all_btn.setEnabled(enabled)
+        self._sync_select_all_button()
 
-        except Exception as e:
-            self.logger.error(f"更新卡片状态失败: error_type={type(e).__name__}")
+    def toggle_select_all(self):
+        visible_keys = {self.account_key(account) for account in self._filtered_accounts()}
+        if not visible_keys:
+            return
+        if visible_keys.issubset(self._selected_keys):
+            self._selected_keys.difference_update(visible_keys)
+        else:
+            self._selected_keys.update(visible_keys)
+        self.refresh_table()
 
-    def onAccountOnline(self, account_data: dict):
-        """账号上线回调"""
-        try:
-            account_card = self.findAccountCard(account_data)
-            if account_card:
-                account_card.setButtonLoading("online", True)
+    def _sync_select_all_button(self):
+        visible_keys = {self.account_key(account) for account in self._filtered_accounts()}
+        all_selected = bool(visible_keys) and visible_keys.issubset(self._selected_keys)
+        self.select_all_btn.setText("取消全选" if all_selected else "全选")
+        self.select_all_btn.setIcon(FIF.CLEAR_SELECTION if all_selected else FIF.CHECKBOX)
+        self.select_all_btn.setEnabled(bool(visible_keys))
 
-            self.status_thread = SetStatusThread(account_data, 1)
-            self.status_thread.status_set_success.connect(self.onStatusSetSuccess)
-            self.status_thread.status_set_failed.connect(self.onStatusSetFailed)
-            self.status_thread.start()
+    def _set_item(self, row, column, text, bold=False, enabled=True):
+        item = QTableWidgetItem(str(text))
+        item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | (Qt.AlignmentFlag.AlignLeft if column in (1, 7) else Qt.AlignmentFlag.AlignCenter))
+        if bold:
+            font = item.font()
+            font.setBold(True)
+            item.setFont(font)
+        if not enabled:
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+        self.table.setItem(row, column, item)
 
-        except Exception as e:
-            self.logger.error(f"启动上线操作失败: error_type={type(e).__name__}")
-            QMessageBox.critical(self, "错误", "启动上线操作失败，请稍后重试")
-
-    def onAccountOffline(self, account_data: dict):
-        """账号离线回调"""
-        try:
-            account_card = self.findAccountCard(account_data)
-            if account_card:
-                account_card.setButtonLoading("offline", True)
-
-            self.status_thread = SetStatusThread(account_data, 3)
-            self.status_thread.status_set_success.connect(self.onStatusSetSuccess)
-            self.status_thread.status_set_failed.connect(self.onStatusSetFailed)
-            self.status_thread.start()
-
-        except Exception as e:
-            self.logger.error(f"启动离线操作失败: error_type={type(e).__name__}")
-            QMessageBox.critical(self, "错误", "启动离线操作失败，请稍后重试")
-
-    def findAccountCard(self, account_data: dict):
-        """查找对应的账号卡片"""
-        for i in range(self.accounts_layout.count() - 1):
-            widget = self.accounts_layout.itemAt(i).widget()
-            if isinstance(widget, AutoReplyCard) and widget.account_data == account_data:
-                return widget
-        return None
-
-    def onStatusSetSuccess(self, account_data: dict, new_status: int):
-        """状态设置成功回调"""
-        try:
-            account_card = self.findAccountCard(account_data)
-            if account_card:
-                account_card.setButtonLoading("online", False)
-                account_card.setButtonLoading("offline", False)
-
-            self.updateCardStatus(account_data, new_status)
-
-            status_text = "在线" if new_status == 1 else "离线"
-            self.logger.info(f"账号 '{account_data['username']}' 已成功设置为{status_text}状态")
-
-        except Exception as e:
-            self.logger.error(f"处理状态设置成功回调失败: error_type={type(e).__name__}")
-
-    def onStatusSetFailed(self, account_data: dict, error_message: str):
-        """状态设置失败回调"""
-        try:
-            account_card = self.findAccountCard(account_data)
-            if account_card:
-                account_card.setButtonLoading("online", False)
-                account_card.setButtonLoading("offline", False)
-
-            self.logger.error(f"设置账号 '{account_data['username']}' 状态失败：{error_message}")
-            QMessageBox.warning(self, "失败", f"设置账号 '{account_data['username']}' 状态失败：{error_message}")
-
-        except Exception as e:
-            self.logger.error(f"处理状态设置失败回调失败: error_type={type(e).__name__}")
-
-    def onAutoReplyToggle(self, account_data: dict):
-        """自动回复开关回调"""
-        try:
-            account_card = self.findAccountCard(account_data)
-            if not account_card:
-                self.logger.error("找不到对应的账号卡片")
-                return
-
-            current_status = auto_reply_manager.is_running(account_data)
-
-            if current_status:
-                self._stop_auto_reply(account_data, account_card)
+    def _set_action(self, row, account, shop_scope=None):
+        widget = QWidget()
+        box = QHBoxLayout(widget)
+        box.setContentsMargins(5, 5, 5, 5)
+        box.setSpacing(5)
+        box.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        if account is None:
+            button = PushButton("只看本店")
+            button.clicked.connect(lambda: self._focus_shop(shop_scope))
+        else:
+            reply = self.reply_status(account)
+            platform = self.platform_status(account)
+            if platform != "在线":
+                button = PrimaryPushButton("验证")
+                button.setIcon(FIF.SYNC)
+                button.clicked.connect(lambda: self.verify_account(account))
             else:
-                self._start_auto_reply(account_data, account_card)
+                stopping = reply in {"运行中", "连接中"}
+                button = PrimaryPushButton("停止" if reply == "运行中" else "取消" if stopping else "启动")
+                button.setIcon(FIF.CANCEL if stopping else FIF.PLAY_SOLID)
+                button.clicked.connect(lambda: self.toggle_reply(account))
+            more = PushButton("更多")
+            more.setFixedSize(72, 30)
+            more.clicked.connect(lambda checked=False, data=account, anchor=more: self._show_account_menu(data, anchor))
+            box.addWidget(more)
+        button.setFixedSize(88 if account is not None else 100, 30)
+        box.addWidget(button)
+        self.table.setCellWidget(row, 8, widget)
 
-        except Exception as e:
-            self.logger.error(f"自动回复开关操作失败: error_type={type(e).__name__}")
-            QMessageBox.critical(self, "错误", "自动回复操作失败，请稍后重试")
+    def _show_account_menu(self, account, anchor):
+        menu = QMenu(self)
+        edit_action = menu.addAction("编辑账号")
+        verify_action = menu.addAction("重新验证")
+        menu.addSeparator()
+        delete_action = menu.addAction("删除账号")
+        selected = menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+        if selected == edit_action:
+            self.edit_account(account)
+        elif selected == verify_action:
+            self.verify_account(account)
+        elif selected == delete_action:
+            self.delete_account(account)
 
-    def _start_auto_reply(self, account_data: dict, account_card):
-        """启动自动回复"""
-        try:
-            if account_data.get("status") != 1:
-                QMessageBox.warning(self, "提示", "账号必须先上线才能开始自动回复！")
-                return
+    def _focus_shop(self, scope):
+        if not scope:
+            return
+        self.shop_filter.setCurrentIndex(self.shop_filter.findData(f"{scope[0]}|{scope[1]}"))
 
-            self._run_llm_preflight([account_data], single_start=True)
+    @staticmethod
+    def _identity_text(value):
+        return {True: "主账号", False: "子账号", None: "待识别"}.get(value, "待识别")
 
-        except Exception as e:
-            self.logger.error(f"启动自动回复失败: error_type={type(e).__name__}")
-            account_card.auto_reply_btn.setText("开始回复")
-            account_card.auto_reply_btn.setEnabled(True)
-            QMessageBox.critical(self, "错误", "启动自动回复失败，请稍后重试")
+    def _summary_text(self):
+        total = len(self.accounts_data)
+        online = sum(self.platform_status(a) == "在线" for a in self.accounts_data)
+        running = sum(self.reply_status(a) == "运行中" for a in self.accounts_data)
+        attention = sum(self.health_status(a, self.reply_status(a)) != "正常" for a in self.accounts_data)
+        return f"{len({(a.get('channel_name'), a.get('shop_id')) for a in self.accounts_data})} 个店铺 · {total} 个账号 · 平台在线 {online} · 回复运行 {running} · 需关注 {attention}"
 
-    def _run_llm_preflight(self, accounts: list[dict], single_start: bool):
-        """验证配置完整性并在后台实测 API，成功后才启动自动回复。"""
+    def refresh_runtime_state(self):
+        if self.accounts_data:
+            self.refresh_table()
+
+    def _selected_accounts(self):
+        return [a for a in self.accounts_data if self.account_key(a) in self._selected_keys]
+
+    def start_selected(self):
+        accounts = self._selected_accounts()
+        eligible = [a for a in accounts if a.get("status") == 1 and not auto_reply_manager.is_running(a)]
+        if not eligible:
+            QMessageBox.information(self, "没有可启动账号", "请先选择在线且未运行自动回复的账号。")
+            return
+        self._run_llm_preflight(eligible)
+
+    def stop_selected(self):
+        accounts = [a for a in self._selected_accounts() if auto_reply_manager.is_running(a)]
+        if not accounts:
+            QMessageBox.information(self, "没有运行中的账号", "当前选择中没有正在运行的自动回复。")
+            return
+        if QMessageBox.question(self, "确认批量停止", f"将停止 {len(accounts)} 个账号的自动回复，是否继续？") != QMessageBox.StandardButton.Yes:
+            return
+        for account in accounts:
+            auto_reply_manager.stop_auto_reply(account)
+        self.refresh_runtime_state()
+
+    def toggle_reply(self, account):
+        if auto_reply_manager.is_running(account):
+            auto_reply_manager.stop_auto_reply(account)
+            self.refresh_runtime_state()
+        elif account.get("status") != 1:
+            QMessageBox.warning(self, "无法启动", "账号必须先验证并处于在线状态。")
+        else:
+            self._run_llm_preflight([account])
+
+    def _run_llm_preflight(self, accounts):
         if self.llm_preflight_thread and self.llm_preflight_thread.isRunning():
-            QMessageBox.information(self, "提示", "正在验证 AI API，请稍候。")
+            QMessageBox.information(self, "正在检查", "正在验证 AI 配置，请稍候。")
             return
         try:
-            llm_config = validate_llm_config()
+            config = validate_llm_config()
         except Exception as exc:
             QMessageBox.warning(self, "AI 配置未完成", str(exc))
             return
-
         self._pending_start_accounts = list(accounts)
-        self._pending_single_start = single_start
-        if single_start:
-            account_card = self.findAccountCard(accounts[0])
-            if account_card:
-                account_card.auto_reply_btn.setText("验证 API...")
-                account_card.auto_reply_btn.setEnabled(False)
-        else:
-            self.start_all_btn.setText("验证 API...")
-            self.start_all_btn.setEnabled(False)
+        self.start_all_btn.setEnabled(False)
+        self.llm_preflight_thread = LLMPreflightThread(config, self)
+        self.llm_preflight_thread.test_finished.connect(self._on_preflight_finished)
+        self.llm_preflight_thread.finished.connect(self._clear_preflight)
+        self.llm_preflight_thread.finished.connect(self.llm_preflight_thread.deleteLater)
+        self.llm_preflight_thread.start()
 
-        thread = LLMPreflightThread(llm_config, self)
-        self.llm_preflight_thread = thread
-        thread.test_finished.connect(self._on_llm_preflight_finished)
-        thread.finished.connect(self._clear_llm_preflight_thread)
+    def _clear_preflight(self):
+        self.llm_preflight_thread = None
+        self.start_all_btn.setEnabled(bool(self._selected_accounts()))
+
+    def _on_preflight_finished(self, success: bool, message: str):
+        accounts = self._pending_start_accounts
+        self._pending_start_accounts = []
+        if not success:
+            QMessageBox.warning(self, "AI 服务不可用", f"无法开启自动回复：{message}")
+            return
+        started = 0
+        for account in accounts:
+            if auto_reply_manager.start_auto_reply(
+                account,
+                on_connection_success=lambda: self.refresh_runtime_state(),
+                on_connection_failed=lambda error, data=account: self._on_reply_failed(data, error),
+                on_ai_service_failed=lambda error, data=account: self._on_ai_failed(data, error),
+            ):
+                started += 1
+        self.refresh_runtime_state()
+        if len(accounts) > 1:
+            QMessageBox.information(self, "操作已提交", f"已发起 {started} / {len(accounts)} 个账号的连接。")
+
+    def _on_reply_failed(self, account, error):
+        account["last_error"] = error
+        self.refresh_runtime_state()
+        QMessageBox.warning(self, "自动回复连接失败", f"账号 {account.get('username', '')}：{error}")
+
+    def _on_ai_failed(self, account, error):
+        key = self.account_key(account)
+        if key in self._reported_ai_failures:
+            return
+        self._reported_ai_failures.add(key)
+        auto_reply_manager.stop_auto_reply(account)
+        account["last_error"] = error
+        self.refresh_runtime_state()
+        QMessageBox.warning(self, "AI 服务已失效", f"账号 {account.get('username', '')} 已停止自动回复：{error}")
+
+    def add_account(self):
+        from ui.user_ui import AddAccountDialog, LoginThread
+        dialog = AddAccountDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.add_btn.setEnabled(False)
+        thread = LoginThread(dialog.getAccountInfo())
+        self._add_thread = thread
+        thread.login_finished.connect(self._on_add_finished)
+        thread.finished.connect(lambda: self.add_btn.setEnabled(True))
         thread.finished.connect(thread.deleteLater)
         thread.start()
 
-    def _on_llm_preflight_finished(self, success: bool, message: str):
-        accounts = self._pending_start_accounts
-        single_start = self._pending_single_start
-        self._pending_start_accounts = []
-        self._pending_single_start = False
-
-        self.start_all_btn.setText("开始所有")
-        self.start_all_btn.setEnabled(True)
-        if not success:
-            for account_data in accounts:
-                account_card = self.findAccountCard(account_data)
-                if account_card and not auto_reply_manager.is_running(account_data):
-                    account_card.setAutoReplyStatus(False)
-            QMessageBox.warning(
-                self,
-                "AI API 不可用",
-                f"无法开启自动回复：{message}\n\n请前往“设置”检查配置并重新测试。",
-            )
+    def _on_add_finished(self, result: Optional[dict]):
+        if not result:
+            QMessageBox.warning(self, "添加失败", "登录验证失败，请检查登录信息后重试。")
             return
+        try:
+            channel, shop_id = result["channel_name"], result["shop_id"]
+            if not account_service.get_shop(channel, shop_id):
+                account_service.add_shop(channel, shop_id, result["shop_name"], result.get("shop_logo"), "由登录自动添加")
+            ok = account_service.add_account(channel, shop_id, result["user_id"], result["username"], result["password"], result.get("cookies"), result.get("is_main_account"))
+            QMessageBox.information(self, "添加成功", "账号已加入店铺运营列表。" if ok else "账号可能已存在，未重复添加。")
+            self.load_accounts()
+        except Exception as exc:
+            self.logger.error(f"保存账号失败: error_type={type(exc).__name__}")
+            QMessageBox.critical(self, "添加失败", "账号保存失败，请查看日志。")
 
-        started_count = 0
-        for account_data in accounts:
-            account_key = auto_reply_manager._account_key(account_data)
-            account_card = self.findAccountCard(account_data)
-            if account_card:
-                account_card.setAutoReplyConnecting(True)
-            success = auto_reply_manager.start_auto_reply(
-                account_data,
-                on_connection_success=lambda data=account_data: self._on_auto_reply_success(data),
-                on_connection_failed=lambda error, data=account_data: self._on_auto_reply_failed(data, error),
-                on_ai_service_failed=lambda error, data=account_data: self._on_ai_service_failed(data, error),
-            )
-            if success:
-                started_count += 1
-                self._reported_ai_failures.discard(account_key)
-            else:
-                account_card = self.findAccountCard(account_data)
-                if account_card:
-                    account_card.setAutoReplyStatus(False)
-
-        self.updateStats()
-        if single_start:
-            if started_count:
-                self.logger.info(f"账号 '{accounts[0]['username']}' 自动回复启动成功")
-            else:
-                QMessageBox.warning(
-                    self, "失败", f"启动账号 '{accounts[0]['username']}' 自动回复失败！"
-                )
+    def edit_account(self, account):
+        from ui.user_ui import EditAccountDialog
+        dialog = EditAccountDialog(account, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        data = dialog.getAccountData()
+        ok = account_service.update_account_info(data["channel_name"], data["shop_id"], data["user_id"], data["username"], data["password"], status=data["status"])
+        if ok:
+            QMessageBox.information(self, "保存成功", "账号信息已更新。")
+            self.load_accounts()
         else:
-            QMessageBox.information(
-                self,
-                "操作完成",
-                f"已发起 {started_count} / {len(accounts)} 个账号的自动回复连接。\n"
-                "连接成功后列表状态会更新；失败账号会显示为未运行并弹出原因。",
-            )
+            QMessageBox.warning(self, "保存失败", "账号信息未能更新。")
 
-    def _clear_llm_preflight_thread(self):
-        self.llm_preflight_thread = None
-
-    def _stop_auto_reply(self, account_data: dict, account_card):
-        """停止自动回复"""
-        try:
-            account_card.auto_reply_btn.setText("停止中...")
-            account_card.auto_reply_btn.setEnabled(False)
-
-            success = auto_reply_manager.stop_auto_reply(account_data)
-            account_card.setAutoReplyStatus(auto_reply_manager.is_running(account_data))
-
-            if success:
-                self.logger.info(f"账号 '{account_data['username']}' 自动回复停止成功")
-            else:
-                self.logger.warning(f"账号 '{account_data['username']}' 自动回复停止可能未完全成功")
-
-            self.updateStats()
-
-        except Exception as e:
-            self.logger.error(f"停止自动回复失败: error_type={type(e).__name__}")
-            account_card.setAutoReplyStatus(False)
-            QMessageBox.critical(self, "错误", "停止自动回复失败，请稍后重试")
-            self.updateStats()
-
-    def _connect_auto_reply_signals(self, account_data: dict):
-        """连接自动回复相关信号"""
-        try:
-            account_key = "_".join(
-                str(account_data.get(key, ""))
-                for key in ("channel_name", "shop_id", "user_id")
-            )
-
-            if account_key in auto_reply_manager.running_accounts:
-                thread = auto_reply_manager.running_accounts[account_key]
-
-                thread.connection_success.connect(
-                    lambda: self._on_auto_reply_success(account_data)
-                )
-                thread.connection_failed.connect(
-                    lambda error: self._on_auto_reply_failed(account_data, error)
-                )
-                thread.ai_service_failed.connect(
-                    lambda error: self._on_ai_service_failed(account_data, error)
-                )
-
-        except Exception as e:
-            self.logger.error(f"连接自动回复信号失败: error_type={type(e).__name__}")
-
-    def _on_auto_reply_success(self, account_data: dict):
-        """自动回复连接成功回调"""
-        try:
-            account_card = self.findAccountCard(account_data)
-            if account_card:
-                account_card.setAutoReplyStatus(True)
-                account_card.auto_reply_btn.setEnabled(True)
-
-            self.logger.info(f"账号 '{account_data['username']}' 自动回复连接成功")
-            self.updateStats()
-
-        except Exception as e:
-            self.logger.error(f"处理自动回复成功回调失败: error_type={type(e).__name__}")
-
-    def _on_auto_reply_failed(self, account_data: dict, error: str):
-        """自动回复连接失败回调"""
-        try:
-            account_card = self.findAccountCard(account_data)
-            if account_card:
-                account_card.setAutoReplyStatus(False)
-                account_card.auto_reply_btn.setText("开始回复")
-                account_card.auto_reply_btn.setEnabled(True)
-
-            self.logger.error(f"账号 '{account_data['username']}' 自动回复连接失败: {error}")
-            QMessageBox.warning(self, "连接失败", f"账号 '{account_data['username']}' 自动回复连接失败：{error}")
-            self.updateStats()
-
-        except Exception as e:
-            self.logger.error(f"处理自动回复失败回调失败: error_type={type(e).__name__}")
-
-    def _on_ai_service_failed(self, account_data: dict, error: str):
-        """停止失效账号，并只在商家端提示 AI 配置问题。"""
-        account_key = auto_reply_manager._account_key(account_data)
-        if account_key in self._reported_ai_failures:
+    def verify_account(self, account):
+        from ui.user_ui import LoginThread
+        key = self.account_key(account)
+        active = getattr(self, "_verify_threads", {}).get(key)
+        if active and active.isRunning():
             return
-        self._reported_ai_failures.add(account_key)
-        auto_reply_manager.stop_auto_reply(account_data)
-        account_card = self.findAccountCard(account_data)
-        if account_card:
-            account_card.setAutoReplyStatus(False)
-        self.updateStats()
-        self.logger.error(
-            f"账号 '{account_data['username']}' 因 AI 服务不可用已停止自动回复: {error}"
-        )
-        QMessageBox.warning(
+        if not hasattr(self, "_verify_threads"):
+            self._verify_threads = {}
+        thread = LoginThread(account)
+        self._verify_threads[key] = thread
+        thread.login_finished.connect(lambda result, data=account: self._on_verify_finished(data, result))
+        thread.finished.connect(lambda key=key: self._verify_threads.pop(key, None))
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+
+    def _on_verify_finished(self, account, result):
+        if isinstance(result, dict):
+            account_service.update_account_cookies(account["channel_name"], account["shop_id"], account["user_id"], result.get("cookies"))
+            account_service.update_account_status(account["channel_name"], account["shop_id"], account["user_id"], 1)
+            if "is_main_account" in result:
+                account_service.update_account_identity(account["channel_name"], account["shop_id"], account["user_id"], result["is_main_account"])
+            QMessageBox.information(self, "验证成功", f"账号 {account.get('username', '')} 已在线。")
+        else:
+            account_service.update_account_status(account["channel_name"], account["shop_id"], account["user_id"], 3)
+            QMessageBox.warning(self, "验证失败", f"账号 {account.get('username', '')} 登录验证失败。")
+        self.load_accounts()
+
+    def delete_account(self, account):
+        if auto_reply_manager.is_running(account):
+            QMessageBox.warning(self, "无法删除", "请先停止该账号的自动回复。")
+            return
+        answer = QMessageBox.question(
             self,
-            "AI 服务已失效",
-            f"账号 '{account_data['username']}' 已停止自动回复：{error}\n\n"
-            "请前往“设置”修复并测试 AI 配置后再重新开启。",
+            "确认删除账号",
+            f"将删除账号 {account.get('username', '')}。历史会话不会随账号一起删除，是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
         )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        if account_service.delete_account(account["channel_name"], account["shop_id"], account["user_id"]):
+            self._selected_keys.discard(self.account_key(account))
+            self.load_accounts()
+        else:
+            QMessageBox.warning(self, "删除失败", "账号未能删除，请查看日志。")
 
-    def updateCardStatus(self, account_data: dict, new_status: int):
-        """更新卡片状态"""
-        for i in range(self.accounts_layout.count() - 1):
-            widget = self.accounts_layout.itemAt(i).widget()
-            if isinstance(widget, AutoReplyCard) and widget.account_data == account_data:
-                widget.updateStatus(new_status)
-                break
 
+# 旧名称作为兼容入口，主窗口现在只注册一个店铺运营页面。
+AutoReplyUI = OperationsUI
 
-__all__ = ['AutoReplyUI']
+__all__ = ["OperationsUI", "AutoReplyUI"]

@@ -36,7 +36,6 @@ class MainWindow(FluentWindow):
         self.knowledge_view = None
         self.monitor_view = None
         self.keyword_manager_view = None
-        self.user_manager_view = None
         self.log_view = None
         self.settingInterface = None
         self.about_view = None
@@ -62,9 +61,6 @@ class MainWindow(FluentWindow):
         from ui.keyword_ui import KeywordManagerWidget
         self.logger.info(f"  import KeywordManagerWidget: {time.perf_counter()-t:.2f}s")
         t = time.perf_counter()
-        from ui.user_ui import UserManagerWidget
-        self.logger.info(f"  import UserManagerWidget: {time.perf_counter()-t:.2f}s")
-        t = time.perf_counter()
         from ui.log_ui import LogUI
         self.logger.info(f"  import LogUI: {time.perf_counter()-t:.2f}s")
         t = time.perf_counter()
@@ -88,9 +84,6 @@ class MainWindow(FluentWindow):
         t = time.perf_counter()
         self.keyword_manager_view = KeywordManagerWidget(self)
         self.logger.info(f"  KeywordManagerWidget: {time.perf_counter()-t:.2f}s")
-        t = time.perf_counter()
-        self.user_manager_view = UserManagerWidget(self)
-        self.logger.info(f"  UserManagerWidget: {time.perf_counter()-t:.2f}s")
         t = time.perf_counter()
         self.log_view = LogUI(self)
         self.logger.info(f"  LogUI: {time.perf_counter()-t:.2f}s")
@@ -117,10 +110,9 @@ class MainWindow(FluentWindow):
     # 初始化导航栏
     def initNavigation(self):
         self.navigationInterface.setExpandWidth(200)
-        self.addSubInterface(self.monitor_view, FIF.CHAT, '自动回复')
+        self.addSubInterface(self.monitor_view, FIF.SHOPPING_CART, '店铺运营')
         self.addSubInterface(self.conversation_view, FIF.MESSAGE, '对话记录')
         self.addSubInterface(self.keyword_manager_view, FIF.EDIT, '关键词管理')
-        self.addSubInterface(self.user_manager_view, FIF.PEOPLE, '账号管理')
         self.addSubInterface(self.knowledge_view, FIF.DOCUMENT, '知识库')
         self.addSubInterface(
             self.help_view, FIF.HELP, '帮助', NavigationItemPosition.BOTTOM
