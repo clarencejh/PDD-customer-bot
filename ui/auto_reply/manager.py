@@ -1,6 +1,7 @@
 # 自动回复管理器模块
 from typing import Dict
 from utils.logger_loguru import get_logger
+from service.llm_service import validate_llm_config
 from .threads import AutoReplyThread
 
 
@@ -9,11 +10,19 @@ class AutoReplyManager:
 
     def __init__(self):
         self.running_accounts: Dict[str, 'AutoReplyThread'] = {}  # 正在运行的账号线程
+        self.connected_accounts = set()
         self.logger = get_logger("AutoReplyManager")
 
-    def start_auto_reply(self, account_data: dict) -> bool:
+    def start_auto_reply(
+        self,
+        account_data: dict,
+        on_connection_success=None,
+        on_connection_failed=None,
+        on_ai_service_failed=None,
+    ) -> bool:
         """启动账号自动回复"""
         try:
+            validate_llm_config()
             account_key = self._account_key(account_data)
 
             # 检查是否已经在运行
@@ -29,6 +38,12 @@ class AutoReplyManager:
             thread.connection_success.connect(lambda: self._on_connection_success(account_key))
             thread.connection_failed.connect(lambda error: self._on_connection_failed(account_key, error))
             thread.finished.connect(lambda: self._on_thread_finished(account_key))
+            if on_connection_success:
+                thread.connection_success.connect(on_connection_success)
+            if on_connection_failed:
+                thread.connection_failed.connect(on_connection_failed)
+            if on_ai_service_failed:
+                thread.ai_service_failed.connect(on_ai_service_failed)
 
             # 启动线程
             self.logger.info(f"启动账号 {account_data['username']} (店铺: {account_data['shop_id']}) 自动回复")
@@ -130,11 +145,13 @@ class AutoReplyManager:
 
     def _on_connection_success(self, account_key: str):
         """连接成功回调"""
+        self.connected_accounts.add(account_key)
         self.logger.debug(f"账号 {account_key} 自动回复连接成功")
 
     def _on_connection_failed(self, account_key: str, error: str):
         """连接失败回调"""
         self.logger.error(f"账号 {account_key} 自动回复连接失败: {error}")
+        self.connected_accounts.discard(account_key)
         # The worker may still be reconnecting.  Keep the reference until the
         # QThread emits ``finished`` so a second start cannot create a rival
         # connection for the same account.
@@ -147,10 +164,19 @@ class AutoReplyManager:
         self.logger.debug(f"账号 {account_key} 自动回复线程已结束")
         if account_key in self.running_accounts:
             del self.running_accounts[account_key]
+        self.connected_accounts.discard(account_key)
 
     def get_running_count(self) -> int:
         """获取正在运行的账号数量"""
         return len(self.running_accounts)
+
+    def get_connected_count(self) -> int:
+        """获取已收到连接成功信号的账号数量。"""
+        return len(self.connected_accounts)
+
+    def is_connected(self, account_data: dict) -> bool:
+        """检查账号是否已经完成 WebSocket 连接。"""
+        return self._account_key(account_data) in self.connected_accounts
 
     def stop_all(self):
         """停止所有自动回复"""

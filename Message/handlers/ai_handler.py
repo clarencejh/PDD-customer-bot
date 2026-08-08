@@ -9,12 +9,18 @@ from bridge.context import Context, ContextType
 from .base import BaseHandler
 from .preprocessor import MessagePreprocessor
 from Agent.bot import Bot
+from service.llm_service import LLMServiceError, llm_error_message
 
 
 class AIReplyHandler(BaseHandler):
     """专注的AI回复处理器"""
 
-    def __init__(self, bot: Bot = None, auto_reply_types: set = None):
+    def __init__(
+        self,
+        bot: Bot = None,
+        auto_reply_types: set = None,
+        failure_callback=None,
+    ):
         super().__init__("AIReplyHandler")
         # 从 DI 容器获取 CustomerAgent 单例（如果未传入）
         if bot is None:
@@ -22,6 +28,7 @@ class AIReplyHandler(BaseHandler):
             from Agent.CustomerAgent.custom.customer_agent import CustomerAgent
             bot = container.get(CustomerAgent)
         self.bot = bot
+        self.failure_callback = failure_callback
         self.preprocessor = MessagePreprocessor()
         self.auto_reply_types = auto_reply_types or {
             ContextType.TEXT,
@@ -60,6 +67,19 @@ class AIReplyHandler(BaseHandler):
 
             return True
 
+        except LLMServiceError as e:
+            message = llm_error_message(e)
+            self.logger.error(f"AI 服务不可用: {message}")
+            if self.failure_callback is not None:
+                try:
+                    self.failure_callback(message)
+                except Exception as callback_error:
+                    self.logger.error(
+                        "AI 服务失败通知异常: "
+                        f"error_type={type(callback_error).__name__}"
+                    )
+            # 故障信息只通知商家端，不向客户发送内部错误或兜底话术。
+            return True
         except Exception as e:
             self.logger.error(
                 f"AI回复处理失败: error_type={type(e).__name__}"
@@ -83,6 +103,8 @@ class AIReplyHandler(BaseHandler):
                 self.logger.warning("Bot不支持reply或async_reply方法")
                 return None
 
+        except LLMServiceError:
+            raise
         except Exception as e:
             self.logger.error(
                 f"AI Bot调用失败: error_type={type(e).__name__}"

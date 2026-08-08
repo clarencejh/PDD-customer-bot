@@ -65,6 +65,8 @@ class Account(Base):
     password = Column(String(255), nullable=False)
     cookies = Column(Text)
     status = Column(Integer, default=None)
+    # True=店铺主账号，False=客服子账号，None=尚未完成身份识别
+    is_main_account = Column(Boolean, nullable=True, default=None)
     shop = relationship("Shop", back_populates="accounts")
 
     def __repr__(self):

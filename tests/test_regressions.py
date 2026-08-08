@@ -37,6 +37,7 @@ from config import (
 )
 from service.account_service import AccountService
 from Agent.CustomerAgent.custom.llm_client import LLMClient
+from ui.logo_loader import normalize_logo_url
 
 
 def _context(from_uid: str, user_id: str = "account-1") -> Context:
@@ -99,7 +100,6 @@ class IdentityRegressionTests(unittest.TestCase):
                     self.assertTrue(stored.startswith("dpapi:v1:"))
             finally:
                 manager.dispose()
-
     def test_legacy_plaintext_password_is_migrated_on_read(self):
         with TemporaryDirectory() as directory:
             manager = DatabaseManager(str(Path(directory) / "legacy.db"))
@@ -126,6 +126,36 @@ class IdentityRegressionTests(unittest.TestCase):
         self.assertTrue(_profile_scope_matches("pinduoduo:shop:user", "shop", "user"))
         self.assertFalse(_profile_scope_matches("pinduoduo:shop:user", "other", "user"))
         self.assertFalse(_profile_scope_matches("malformed", "shop", "user"))
+
+    def test_account_identity_is_migrated_and_exposed(self):
+        with TemporaryDirectory() as directory:
+            manager = DatabaseManager(str(Path(directory) / "identity.db"))
+            try:
+                manager.add_shop("pinduoduo", "shop", "Shop", "")
+                manager.add_account(
+                    "pinduoduo", "shop", "user", "name", "pass",
+                    is_main_account=False,
+                )
+                account = manager.get_account("pinduoduo", "shop", "user")
+                self.assertIs(account["is_main_account"], False)
+                self.assertIs(
+                    manager.get_all_accounts_with_details()[0]["is_main_account"],
+                    False,
+                )
+            finally:
+                manager.dispose()
+
+
+class LogoLoaderRegressionTests(unittest.TestCase):
+    def test_platform_logo_urls_are_upgraded_to_https(self):
+        self.assertEqual(
+            normalize_logo_url("http://t16img.yangkeduo.com/logo.png"),
+            "https://t16img.yangkeduo.com/logo.png",
+        )
+        self.assertEqual(
+            normalize_logo_url("//t16img.yangkeduo.com/logo.png"),
+            "https://t16img.yangkeduo.com/logo.png",
+        )
 
 
 class LoginServiceRegressionTests(unittest.IsolatedAsyncioTestCase):
@@ -311,6 +341,68 @@ class LLMProviderTaskRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(results["good-provider"][0])
         self.assertFalse(results["bad-provider"][0])
+
+
+class AutoReplyLLMGuardRegressionTests(unittest.IsolatedAsyncioTestCase):
+    def test_incomplete_llm_config_is_rejected(self):
+        from service.llm_service import validate_llm_config
+
+        for config_data, expected in (
+            ({"api_key": "", "api_base": "https://example.com/v1", "model_name": "m"}, "API Key"),
+            ({"api_key": "key", "api_base": "", "model_name": "m"}, "API Base URL"),
+            ({"api_key": "key", "api_base": "https://example.com/v1", "model_name": ""}, "模型名称"),
+        ):
+            with self.subTest(config_data=config_data):
+                with self.assertRaisesRegex(ValueError, expected):
+                    validate_llm_config(config_data)
+
+    def test_manager_does_not_create_thread_without_llm_config(self):
+        from ui.auto_reply.manager import AutoReplyManager
+
+        manager = AutoReplyManager()
+        account = {
+            "channel_name": "pinduoduo",
+            "shop_id": "shop-1",
+            "user_id": "account-1",
+            "username": "seller",
+        }
+        with mock.patch(
+            "ui.auto_reply.manager.validate_llm_config",
+            side_effect=ValueError("未配置"),
+        ), mock.patch("ui.auto_reply.manager.AutoReplyThread") as thread_class:
+            self.assertFalse(manager.start_auto_reply(account))
+        thread_class.assert_not_called()
+
+    async def test_llm_failure_notifies_operator_without_replying_to_customer(self):
+        from Message.handlers.ai_handler import AIReplyHandler
+        from service.llm_service import LLMServiceError
+
+        class FailingBot:
+            async def async_reply(self, query, context):
+                raise LLMServiceError("API Key 无效或已过期。")
+
+        failures = []
+        handler = AIReplyHandler(FailingBot(), failure_callback=failures.append)
+        with mock.patch.object(
+            handler, "_send_reply", new=mock.AsyncMock(return_value=True)
+        ) as send_reply:
+            handled = await handler.handle(_context("customer-1"), {})
+
+        self.assertTrue(handled)
+        self.assertEqual(failures, ["API Key 无效或已过期。"])
+        send_reply.assert_not_awaited()
+
+    async def test_agent_initialization_failure_is_not_returned_as_customer_text(self):
+        from Agent.CustomerAgent.custom.customer_agent import CustomerAgent
+        from service.llm_service import LLMServiceError
+
+        agent = CustomerAgent()
+        agent._initialization_error = "尚未配置 LLM API Key。"
+        with mock.patch.object(
+            agent, "initialize_async", new=mock.AsyncMock(return_value=False)
+        ):
+            with self.assertRaisesRegex(LLMServiceError, "尚未配置"):
+                await agent.async_reply("你好", _context("customer-1"))
 
 
 class ToolScopeRegressionTests(unittest.TestCase):

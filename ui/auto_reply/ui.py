@@ -6,9 +6,10 @@ from qfluentwidgets import (SubtitleLabel, CaptionLabel, PushButton, PrimaryPush
                             ScrollArea, FluentIcon as FIF)
 from utils.logger_loguru import get_logger
 from service.account_service import account_service
+from service.llm_service import validate_llm_config
 from .card import AutoReplyCard
 from .manager import auto_reply_manager
-from .threads import SetStatusThread
+from .threads import AccountIdentityThread, LLMPreflightThread, SetStatusThread
 
 
 class AutoReplyUI(QFrame):
@@ -19,6 +20,12 @@ class AutoReplyUI(QFrame):
         self.logger = get_logger()
         self.accounts_data = []
         self._loaded_once = False
+        self.llm_preflight_thread = None
+        self.identity_thread = None
+        self._identity_refresh_attempted = False
+        self._pending_start_accounts = []
+        self._pending_single_start = False
+        self._reported_ai_failures = set()
         self.setupUI()
         QTimer.singleShot(300, self._maybeLoadOnShow)
 
@@ -164,9 +171,33 @@ class AutoReplyUI(QFrame):
             self.accounts_data.extend(all_accounts)
 
             self.refreshAccountList()
+            self._refresh_unknown_account_identities()
 
         except Exception as e:
             self.logger.error(f"加载账号数据失败: error_type={type(e).__name__}")
+
+    def _refresh_unknown_account_identities(self):
+        """Resolve legacy account identities once without blocking the UI."""
+        if self._identity_refresh_attempted:
+            return
+        unknown_accounts = [
+            account
+            for account in self.accounts_data
+            if account.get("is_main_account") is None and account.get("cookies")
+        ]
+        if not unknown_accounts:
+            return
+        self._identity_refresh_attempted = True
+        thread = AccountIdentityThread(unknown_accounts, self)
+        self.identity_thread = thread
+        thread.identities_updated.connect(self._on_account_identities_updated)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+
+    def _on_account_identities_updated(self, updated_count: int):
+        self.identity_thread = None
+        if updated_count:
+            self.loadAccountsFromDB()
 
     def refreshAccountList(self):
         """刷新账号列表"""
@@ -179,9 +210,9 @@ class AutoReplyUI(QFrame):
             account_card.offline_clicked.connect(self.onAccountOffline)
             account_card.auto_reply_clicked.connect(self.onAutoReplyToggle)
 
-            is_running = auto_reply_manager.is_running(account_data)
-            self.logger.debug(f"账号 {account_data['username']} 状态检查: running={is_running}")
-            account_card.setAutoReplyStatus(is_running)
+            is_connected = auto_reply_manager.is_connected(account_data)
+            self.logger.debug(f"账号 {account_data['username']} 状态检查: connected={is_connected}")
+            account_card.setAutoReplyStatus(is_connected)
 
             self.accounts_layout.addWidget(account_card)
 
@@ -199,7 +230,7 @@ class AutoReplyUI(QFrame):
     def updateStats(self):
         """更新统计信息"""
         count = len(self.accounts_data)
-        running_count = auto_reply_manager.get_running_count()
+        running_count = auto_reply_manager.get_connected_count()
         self.stats_label.setText(f"共 {count} 个账号")
         self.running_stats_label.setText(f"运行中: {running_count} 个")
 
@@ -211,8 +242,11 @@ class AutoReplyUI(QFrame):
             for i in range(self.accounts_layout.count() - 1):
                 widget = self.accounts_layout.itemAt(i).widget()
                 if isinstance(widget, AutoReplyCard):
-                    is_running = auto_reply_manager.is_running(widget.account_data)
+                    is_running = auto_reply_manager.is_connected(widget.account_data)
                     current_status = widget.auto_reply_status
+
+                    if widget.auto_reply_pending:
+                        continue
 
                     if is_running != current_status:
                         if current_status and not is_running:
@@ -243,6 +277,11 @@ class AutoReplyUI(QFrame):
     def onStartAllAutoReply(self):
         """开始所有符合条件的账号的自动回复"""
         try:
+            not_eligible_count = sum(
+                1
+                for acc_data in self.accounts_data
+                if acc_data.get("status") != 1 or auto_reply_manager.is_running(acc_data)
+            )
             eligible_accounts = [
                 acc_data for acc_data in self.accounts_data
                 if acc_data.get("status") == 1 and not auto_reply_manager.is_running(acc_data)
@@ -255,25 +294,16 @@ class AutoReplyUI(QFrame):
             reply = QMessageBox.question(
                 self,
                 "确认开始",
-                f"找到 {len(eligible_accounts)} 个可启动的账号。确定要全部开始自动回复吗？",
+                f"找到 {len(eligible_accounts)} 个在线且未运行的账号。"
+                f"{f'另有 {not_eligible_count} 个账号因未上线或已运行而跳过。' if not_eligible_count else ''}"
+                "\n确定要开始这些账号的自动回复吗？",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No
             )
 
             if reply == QMessageBox.StandardButton.No:
                 return
-
-            started_count = 0
-            for account_data in eligible_accounts:
-                success = auto_reply_manager.start_auto_reply(account_data)
-                if success:
-                    started_count += 1
-                    self._connect_auto_reply_signals(account_data)
-
-            self._update_all_cards_auto_reply_status()
-            self.updateStats()
-
-            QMessageBox.information(self, "操作完成", f"已成功为 {started_count} / {len(eligible_accounts)} 个账号启动自动回复。")
+            self._run_llm_preflight(eligible_accounts, single_start=False)
 
         except Exception as e:
             self.logger.error(f"开始所有自动回复失败: error_type={type(e).__name__}")
@@ -312,7 +342,7 @@ class AutoReplyUI(QFrame):
             for i in range(self.accounts_layout.count() - 1):
                 widget = self.accounts_layout.itemAt(i).widget()
                 if isinstance(widget, AutoReplyCard):
-                    is_running = auto_reply_manager.is_running(widget.account_data)
+                    is_running = auto_reply_manager.is_connected(widget.account_data)
                     widget.setAutoReplyStatus(is_running)
 
         except Exception as e:
@@ -414,25 +444,101 @@ class AutoReplyUI(QFrame):
                 QMessageBox.warning(self, "提示", "账号必须先上线才能开始自动回复！")
                 return
 
-            account_card.auto_reply_btn.setText("启动中...")
-            account_card.auto_reply_btn.setEnabled(False)
-
-            success = auto_reply_manager.start_auto_reply(account_data)
-
-            if success:
-                account_card.setAutoReplyStatus(True)
-                self.logger.info(f"账号 '{account_data['username']}' 自动回复启动成功")
-                self._connect_auto_reply_signals(account_data)
-            else:
-                account_card.auto_reply_btn.setText("开始回复")
-                account_card.auto_reply_btn.setEnabled(True)
-                QMessageBox.warning(self, "失败", f"启动账号 '{account_data['username']}' 自动回复失败！")
+            self._run_llm_preflight([account_data], single_start=True)
 
         except Exception as e:
             self.logger.error(f"启动自动回复失败: error_type={type(e).__name__}")
             account_card.auto_reply_btn.setText("开始回复")
             account_card.auto_reply_btn.setEnabled(True)
             QMessageBox.critical(self, "错误", "启动自动回复失败，请稍后重试")
+
+    def _run_llm_preflight(self, accounts: list[dict], single_start: bool):
+        """验证配置完整性并在后台实测 API，成功后才启动自动回复。"""
+        if self.llm_preflight_thread and self.llm_preflight_thread.isRunning():
+            QMessageBox.information(self, "提示", "正在验证 AI API，请稍候。")
+            return
+        try:
+            llm_config = validate_llm_config()
+        except Exception as exc:
+            QMessageBox.warning(self, "AI 配置未完成", str(exc))
+            return
+
+        self._pending_start_accounts = list(accounts)
+        self._pending_single_start = single_start
+        if single_start:
+            account_card = self.findAccountCard(accounts[0])
+            if account_card:
+                account_card.auto_reply_btn.setText("验证 API...")
+                account_card.auto_reply_btn.setEnabled(False)
+        else:
+            self.start_all_btn.setText("验证 API...")
+            self.start_all_btn.setEnabled(False)
+
+        thread = LLMPreflightThread(llm_config, self)
+        self.llm_preflight_thread = thread
+        thread.test_finished.connect(self._on_llm_preflight_finished)
+        thread.finished.connect(self._clear_llm_preflight_thread)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+
+    def _on_llm_preflight_finished(self, success: bool, message: str):
+        accounts = self._pending_start_accounts
+        single_start = self._pending_single_start
+        self._pending_start_accounts = []
+        self._pending_single_start = False
+
+        self.start_all_btn.setText("开始所有")
+        self.start_all_btn.setEnabled(True)
+        if not success:
+            for account_data in accounts:
+                account_card = self.findAccountCard(account_data)
+                if account_card and not auto_reply_manager.is_running(account_data):
+                    account_card.setAutoReplyStatus(False)
+            QMessageBox.warning(
+                self,
+                "AI API 不可用",
+                f"无法开启自动回复：{message}\n\n请前往“设置”检查配置并重新测试。",
+            )
+            return
+
+        started_count = 0
+        for account_data in accounts:
+            account_key = auto_reply_manager._account_key(account_data)
+            account_card = self.findAccountCard(account_data)
+            if account_card:
+                account_card.setAutoReplyConnecting(True)
+            success = auto_reply_manager.start_auto_reply(
+                account_data,
+                on_connection_success=lambda data=account_data: self._on_auto_reply_success(data),
+                on_connection_failed=lambda error, data=account_data: self._on_auto_reply_failed(data, error),
+                on_ai_service_failed=lambda error, data=account_data: self._on_ai_service_failed(data, error),
+            )
+            if success:
+                started_count += 1
+                self._reported_ai_failures.discard(account_key)
+            else:
+                account_card = self.findAccountCard(account_data)
+                if account_card:
+                    account_card.setAutoReplyStatus(False)
+
+        self.updateStats()
+        if single_start:
+            if started_count:
+                self.logger.info(f"账号 '{accounts[0]['username']}' 自动回复启动成功")
+            else:
+                QMessageBox.warning(
+                    self, "失败", f"启动账号 '{accounts[0]['username']}' 自动回复失败！"
+                )
+        else:
+            QMessageBox.information(
+                self,
+                "操作完成",
+                f"已发起 {started_count} / {len(accounts)} 个账号的自动回复连接。\n"
+                "连接成功后列表状态会更新；失败账号会显示为未运行并弹出原因。",
+            )
+
+    def _clear_llm_preflight_thread(self):
+        self.llm_preflight_thread = None
 
     def _stop_auto_reply(self, account_data: dict, account_card):
         """停止自动回复"""
@@ -473,6 +579,9 @@ class AutoReplyUI(QFrame):
                 thread.connection_failed.connect(
                     lambda error: self._on_auto_reply_failed(account_data, error)
                 )
+                thread.ai_service_failed.connect(
+                    lambda error: self._on_ai_service_failed(account_data, error)
+                )
 
         except Exception as e:
             self.logger.error(f"连接自动回复信号失败: error_type={type(e).__name__}")
@@ -482,7 +591,7 @@ class AutoReplyUI(QFrame):
         try:
             account_card = self.findAccountCard(account_data)
             if account_card:
-                account_card.auto_reply_btn.setText("停止回复")
+                account_card.setAutoReplyStatus(True)
                 account_card.auto_reply_btn.setEnabled(True)
 
             self.logger.info(f"账号 '{account_data['username']}' 自动回复连接成功")
@@ -506,6 +615,27 @@ class AutoReplyUI(QFrame):
 
         except Exception as e:
             self.logger.error(f"处理自动回复失败回调失败: error_type={type(e).__name__}")
+
+    def _on_ai_service_failed(self, account_data: dict, error: str):
+        """停止失效账号，并只在商家端提示 AI 配置问题。"""
+        account_key = auto_reply_manager._account_key(account_data)
+        if account_key in self._reported_ai_failures:
+            return
+        self._reported_ai_failures.add(account_key)
+        auto_reply_manager.stop_auto_reply(account_data)
+        account_card = self.findAccountCard(account_data)
+        if account_card:
+            account_card.setAutoReplyStatus(False)
+        self.updateStats()
+        self.logger.error(
+            f"账号 '{account_data['username']}' 因 AI 服务不可用已停止自动回复: {error}"
+        )
+        QMessageBox.warning(
+            self,
+            "AI 服务已失效",
+            f"账号 '{account_data['username']}' 已停止自动回复：{error}\n\n"
+            "请前往“设置”修复并测试 AI 配置后再重新开启。",
+        )
 
     def updateCardStatus(self, account_data: dict, new_status: int):
         """更新卡片状态"""

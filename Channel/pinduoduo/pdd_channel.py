@@ -88,6 +88,7 @@ class PDDChannel(ConnectionMixin, MessageHandlerMixin, LifecycleMixin, StatusMix
         self.consumer_manager = MessageConsumerManager(self.queue_manager)
         self._account_agent = None
         self._account_key = None
+        self.ai_failure_callback = None
 
         # WebSocket优化功能
         self.reconnect_config = ReconnectConfig()

@@ -31,6 +31,7 @@ from bridge.reply import Reply, ReplyType
 from Agent.CustomerAgent.custom.session_manager import SessionManager
 from Agent.CustomerAgent.custom.tool_decorator import get_tools_for_llm
 from utils.logger_loguru import get_logger
+from service.llm_service import LLMServiceError, llm_error_message, validate_llm_config
 
 # 导入重构后的模块
 from Agent.CustomerAgent.custom.agent_config import (
@@ -81,6 +82,7 @@ class CustomerAgent(Bot):
     ):
         super().__init__()
         self._is_initialized = False
+        self._initialization_error: Optional[str] = None
 
         # 配置参数
         self._config = AgentConfig(
@@ -123,8 +125,11 @@ class CustomerAgent(Bot):
             self._config = AgentConfig.load_from_config()
 
             # 2. 验证配置
-            if not self._config.validate():
-                return False
+            validate_llm_config({
+                "api_key": self._config.api_key,
+                "api_base": self._config.api_base,
+                "model_name": self._config.model_name,
+            })
 
             # 3. 初始化 LLM 客户端
             self._llm_client = LLMClient(
@@ -159,10 +164,12 @@ class CustomerAgent(Bot):
             logger.info(f"已加载 {len(self._tools)} 个工具: {tool_names}")
 
             self._is_initialized = True
+            self._initialization_error = None
             logger.info(f"CustomerAgent 初始化成功: model={self._config.model_name}")
             return True
 
         except Exception as e:
+            self._initialization_error = llm_error_message(e)
             logger.error(
                 f"CustomerAgent 初始化失败: error_type={type(e).__name__}"
             )
@@ -213,7 +220,9 @@ class CustomerAgent(Bot):
         # 延迟初始化
         if not self._is_initialized:
             if not await self.initialize_async():
-                return Reply(ReplyType.TEXT, "AI客服初始化失败，请检查配置。")
+                raise LLMServiceError(
+                    self._initialization_error or "AI 客服初始化失败，请检查配置。"
+                )
 
         try:
             # 构建 session_id 和 dependencies
@@ -269,6 +278,8 @@ class CustomerAgent(Bot):
 
             return Reply(ReplyType.TEXT, final_content or "抱歉，我暂时无法回复。")
 
+        except LLMServiceError:
+            raise
         except Exception as e:
             logger.error(
                 f"CustomerAgent 回复失败: error_type={type(e).__name__}"
@@ -296,13 +307,7 @@ class CustomerAgent(Bot):
                 logger.error(
                     f"LLM 调用失败: error_type={type(e).__name__}"
                 )
-                if loop_count == 0:
-                    return "抱歉，AI 服务暂时不可用，请稍后再试。"
-                # 已有中间结果，返回已生成的内容
-                for msg in reversed(messages):
-                    if msg.get("role") == "assistant" and msg.get("content"):
-                        return msg["content"]
-                return "抱歉，AI 服务暂时不可用，请稍后再试。"
+                raise LLMServiceError(llm_error_message(e)) from e
 
             # 2. 解析响应
             if not response.has_tool_calls:
@@ -349,8 +354,8 @@ class CustomerAgent(Bot):
                 try:
                     final_response = await self._llm_client.chat(messages)
                     return final_response.content or assistant_msg["content"]
-                except Exception:
-                    return assistant_msg["content"]
+                except Exception as e:
+                    raise LLMServiceError(llm_error_message(e)) from e
 
             # 5. 并行执行所有工具调用
             tool_results = await self._tool_executor.execute_parallel(

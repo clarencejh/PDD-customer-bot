@@ -42,6 +42,7 @@ class MessageHandlerMixin:
                 use_ai=True,
                 business_hours=self.business_hours,
                 bot=self._account_agent,
+                ai_failure_callback=getattr(self, "ai_failure_callback", None),
             )
             for handler in handlers:
                 consumer.add_handler(handler)

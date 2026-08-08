@@ -31,8 +31,8 @@ class AccountService:
     def get_account(self, channel_name, shop_id, user_id):
         return db_manager.get_account(channel_name, shop_id, user_id)
 
-    def add_account(self, channel_name, shop_id, user_id, username, password, cookies=None) -> bool:
-        return db_manager.add_account(channel_name, shop_id, user_id, username, password, cookies)
+    def add_account(self, channel_name, shop_id, user_id, username, password, cookies=None, is_main_account=None) -> bool:
+        return db_manager.add_account(channel_name, shop_id, user_id, username, password, cookies, is_main_account)
 
     def update_account_info(self, channel_name, shop_id, user_id, username=None, password=None, cookies=None, status=None) -> bool:
         return db_manager.update_account_info(channel_name, shop_id, user_id, username, password, cookies, status)
@@ -42,6 +42,9 @@ class AccountService:
 
     def update_account_cookies(self, channel_name, shop_id, user_id, cookies) -> bool:
         return db_manager.update_account_cookies(channel_name, shop_id, user_id, cookies)
+
+    def update_account_identity(self, channel_name, shop_id, user_id, is_main_account) -> bool:
+        return db_manager.update_account_identity(channel_name, shop_id, user_id, is_main_account)
 
     def delete_account(self, channel_name, shop_id, user_id) -> bool:
         return db_manager.delete_account(channel_name, shop_id, user_id)

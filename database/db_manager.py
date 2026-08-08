@@ -38,6 +38,7 @@ class DatabaseManager:
 
         # 创建表结构
         Base.metadata.create_all(self.engine)
+        self._ensure_account_identity_column()
 
         self.logger = get_logger()
         # 初始化数据库
@@ -48,6 +49,18 @@ class DatabaseManager:
         channel_name = "pinduoduo"
         description = "拼多多"
         self.add_channel(channel_name, description)
+
+    def _ensure_account_identity_column(self) -> None:
+        """Add the identity field to databases created by older versions."""
+        with self.engine.begin() as connection:
+            columns = {
+                row[1]
+                for row in connection.exec_driver_sql("PRAGMA table_info(accounts)")
+            }
+            if "is_main_account" not in columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE accounts ADD COLUMN is_main_account BOOLEAN"
+                )
 
 
     def get_session(self):
@@ -289,7 +302,7 @@ class DatabaseManager:
             return True
 
     # ==================== 账号相关操作 ====================
-    def add_account(self, channel_name: str, shop_id: str, user_id: str, username: str, password: str, cookies: str = None) -> bool:
+    def add_account(self, channel_name: str, shop_id: str, user_id: str, username: str, password: str, cookies: str = None, is_main_account: bool | None = None) -> bool:
         """添加账号"""
         with self.session_scope() as session:
             channel = self._get_channel(session, channel_name)
@@ -314,7 +327,8 @@ class DatabaseManager:
                 username=username,
                 password=protect_secret(password) or "",
                 cookies=self._stored_cookies(cookies),
-                status=None
+                status=None,
+                is_main_account=is_main_account,
             )
             session.add(account)
             self.logger.info(f"成功添加账号: {username} 到店铺 {shop_id}")
@@ -342,7 +356,8 @@ class DatabaseManager:
                 'username': account.username,
                 'password': self._read_password(account),
                 'cookies': self._read_cookies(account),
-                'status': account.status
+                'status': account.status,
+                'is_main_account': account.is_main_account,
             }
 
     def update_account_info(self, channel_name: str, shop_id: str, user_id: str, username: Optional[str] = None, password: Optional[str] = None, cookies: Optional[str] = None, status: Optional[int] = None) -> bool:
@@ -390,7 +405,8 @@ class DatabaseManager:
                     'username': account.username,
                     'password': self._read_password(account),
                     'cookies': self._read_cookies(account),
-                    'status': account.status
+                    'status': account.status,
+                    'is_main_account': account.is_main_account,
                 })
             return result
 
@@ -421,7 +437,8 @@ class DatabaseManager:
                     'password': self._read_password(account),
                     'status': account.status,
                     'user_id': account.user_id,
-                    'cookies': self._read_cookies(account)
+                    'cookies': self._read_cookies(account),
+                    'is_main_account': account.is_main_account,
                 })
             return details
 
@@ -453,6 +470,17 @@ class DatabaseManager:
             if not account:
                 return False
             account.cookies = self._stored_cookies(cookies)
+            return True
+
+    def update_account_identity(self, channel_name: str, shop_id: str, user_id: str, is_main_account: bool | None) -> bool:
+        """Persist the platform-reported main/sub-account identity."""
+        with self.session_scope() as session:
+            channel = self._get_channel(session, channel_name)
+            shop = self._get_shop(session, channel, shop_id) if channel else None
+            account = self._get_account_by_user_id(session, shop, user_id) if shop else None
+            if not account:
+                return False
+            account.is_main_account = is_main_account
             return True
 
     def delete_account(self, channel_name: str, shop_id: str, user_id: str) -> bool:

@@ -550,13 +550,25 @@ class PDDLogin():
                     pass
 
     def Set_user_info(self,cookies_json):
-        user_info = GetUserInfo(cookies_json)
-        result = user_info.get_user_info()
-        if result is False:
+        result = self.Set_user_details(cookies_json)
+        if result is None:
+            self.last_is_main_account = None
             self.logger.error("获取用户信息失败")
             return None, None, None
-        user_id, user_name, mall_id = result
-        return user_id, user_name, mall_id
+        self.last_is_main_account = result[3]
+        return result[:3]
+
+    def Set_user_details(self, cookies_json):
+        result = GetUserInfo(cookies_json).get_user_details()
+        if result is False:
+            return None
+        owner = result.get("mallOwner")
+        return (
+            result.get("id"),
+            result.get("username"),
+            result.get("mall_id"),
+            bool(owner) if owner is not None else None,
+        )
 
     def Set_shop_info(self,cookies_json):
         shop_info = GetShopInfo(cookies_json)
@@ -593,6 +605,7 @@ async def login_pdd(
     try:
         # 获取用户信息和店铺信息
         user_id, user_name, mall_id = pdd_login.Set_user_info(cookies_json)
+        is_main_account = getattr(pdd_login, "last_is_main_account", None)
         shop_id, shop_name, mallLogo = pdd_login.Set_shop_info(cookies_json)
         
         # 检查是否成功获取到必要信息
@@ -631,6 +644,7 @@ async def login_pdd(
             "username": str(user_name or user_id) if login_mode == "qr" else name,
             "password": password, # 使用传入的密码
             "cookies": cookies_json,
+            "is_main_account": is_main_account,
         }
     except Exception as e:
         pdd_login.logger.error(
@@ -668,6 +682,7 @@ async def refresh_pdd_cookies(name, password=None, profile_scope=None):
     try:
         # 获取用户信息和店铺信息
         user_id, user_name, mall_id = pdd_login.Set_user_info(cookies_json)
+        is_main_account = getattr(pdd_login, "last_is_main_account", None)
         shop_id, shop_name, mallLogo = pdd_login.Set_shop_info(cookies_json)
         
         # 检查是否成功获取到必要信息
@@ -696,10 +711,10 @@ async def refresh_pdd_cookies(name, password=None, profile_scope=None):
             "username": name,
             "password": password or "",
             "cookies": cookies_json,
+            "is_main_account": is_main_account,
         }
     except Exception as e:
         pdd_login.logger.error(
             f"账号 '{name}' cookies刷新成功，但在处理后续信息时出错: {type(e).__name__}"
         )
         return False
-

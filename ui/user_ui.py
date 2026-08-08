@@ -5,58 +5,15 @@ from typing import Any, Dict, Optional
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, pyqtSignal as Signal, QTimer
 from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QVBoxLayout, QWidget, QLabel,
                             QMessageBox, QDialog, QFormLayout)
-from PyQt6.QtGui import QFont, QPixmap, QPainter, QPainterPath
+from PyQt6.QtGui import QFont, QPixmap
 from qfluentwidgets import (CardWidget, SubtitleLabel, CaptionLabel, BodyLabel,
                            PrimaryPushButton, PushButton, StrongBodyLabel,
                            InfoBadge, ScrollArea, FluentIcon as FIF)
 from service.account_service import account_service
 from utils.logger_loguru import get_logger
-from utils.safe_image_fetch import fetch_image
+from ui.logo_loader import ShopLogoLoader
 
 logger = get_logger("UserUI")
-
-class LogoLoaderThread(QThread):
-    """异步加载Logo的线程"""
-    logo_loaded = pyqtSignal(QPixmap)
-
-    def __init__(self, url):
-        super().__init__()
-        self.url = url
-
-    def run(self):
-        try:
-            image_data = fetch_image(self.url)
-
-            pixmap = QPixmap()
-            pixmap.loadFromData(image_data)
-
-            if pixmap.isNull():
-                raise ValueError("Loaded data is not a valid image.")
-
-            # 创建圆形pixmap
-            size = 60
-            circular_pixmap = QPixmap(size, size)
-            circular_pixmap.fill(Qt.GlobalColor.transparent)
-
-            painter = QPainter(circular_pixmap)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            
-            path = QPainterPath()
-            path.addEllipse(0, 0, size, size)
-            
-            painter.setClipPath(path)
-            
-            # 缩放并绘制原始图片
-            scaled_pixmap = pixmap.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
-            painter.drawPixmap(0, 0, scaled_pixmap)
-            painter.end()
-
-            self.logo_loaded.emit(circular_pixmap)
-        except Exception as e:
-            logger.error(
-                f"Failed to load logo: error_type={type(e).__name__}"
-            )
-            self.logo_loaded.emit(QPixmap()) # 失败时发射空pixmap
 
 class LoginThread(QThread):
     """登录验证线程"""
@@ -160,11 +117,9 @@ class AccountCard(CardWidget):
     def loadLogo(self):
         """异步加载Logo"""
         if self.shop_logo:
-            def _start():
-                self.logo_loader_thread = LogoLoaderThread(self.shop_logo)
-                self.logo_loader_thread.logo_loaded.connect(self.setLogo)
-                self.logo_loader_thread.start()
-            QTimer.singleShot(200, _start)
+            self.logo_loader = ShopLogoLoader(self.shop_logo, self)
+            self.logo_loader.logo_loaded.connect(self.setLogo)
+            self.logo_loader.start()
         else:
             self.logo_label.setText("无Logo")
 
@@ -598,6 +553,13 @@ class UserManagerWidget(QFrame):
                 )
                 
                 if cookies_updated and status_updated:
+                    if "is_main_account" in result:
+                        account_service.update_account_identity(
+                            account_data["channel_name"],
+                            account_data["shop_id"],
+                            account_data["user_id"],
+                            result["is_main_account"],
+                        )
                     # 更新卡片状态显示
                     account_card.updateStatus(1)
                     QMessageBox.information(
@@ -685,7 +647,8 @@ class UserManagerWidget(QFrame):
                 username=username,
                 password=result["password"],
                 user_id=result.get("user_id"),
-                cookies=result.get("cookies")
+                cookies=result.get("cookies"),
+                is_main_account=result.get("is_main_account"),
             )
 
             if success:

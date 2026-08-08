@@ -83,9 +83,9 @@ async def get_message(queue_name: str, timeout: float = None):
 # 便捷的处理器创建函数
 # ============================================================================
 
-def create_ai_handler(bot=None) -> AIReplyHandler:
+def create_ai_handler(bot=None, failure_callback=None) -> AIReplyHandler:
     """创建AI回复处理器"""
-    return AIReplyHandler(bot)
+    return AIReplyHandler(bot, failure_callback=failure_callback)
 
 
 def create_simple_handlers() -> list:
@@ -156,7 +156,13 @@ def reload_keywords() -> None:
 
 
 # 提供兼容的handler_chain函数实现
-def handler_chain(use_ai=True, businessHours=None, bot=None, business_hours=None):
+def handler_chain(
+    use_ai=True,
+    businessHours=None,
+    bot=None,
+    business_hours=None,
+    ai_failure_callback=None,
+):
     """简化版处理器链创建函数 - 包含关键词检测"""
     handlers = []
     if business_hours is None:
@@ -171,7 +177,7 @@ def handler_chain(use_ai=True, businessHours=None, bot=None, business_hours=None
 
     # 2. 如果启用AI，添加AI处理器
     if use_ai:
-        handlers.append(create_ai_handler(bot))
+        handlers.append(create_ai_handler(bot, ai_failure_callback))
 
     # 3. 最后添加兜底处理器
     handlers.append(CatchAllHandler())

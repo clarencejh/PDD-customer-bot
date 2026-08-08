@@ -1,54 +1,12 @@
 # 后台线程模块
 import asyncio
 from PyQt6.QtCore import QThread, pyqtSignal
-from PyQt6.QtGui import QPixmap, QPainter, QPainterPath
-from PyQt6.QtCore import Qt
 from utils.logger_loguru import get_logger
-from utils.safe_image_fetch import fetch_image
+from ui.logo_loader import ShopLogoLoader
+from service.llm_service import llm_error_message, test_llm_connection
 
 
-class LogoLoaderThread(QThread):
-    """异步加载Logo的线程"""
-    logo_loaded = pyqtSignal(QPixmap)
-
-    def __init__(self, url):
-        super().__init__()
-        self.url = url
-
-    def run(self):
-        try:
-            image_data = fetch_image(self.url)
-
-            pixmap = QPixmap()
-            pixmap.loadFromData(image_data)
-
-            if pixmap.isNull():
-                raise ValueError("Loaded data is not a valid image.")
-
-            # 创建圆形pixmap
-            size = 60
-            circular_pixmap = QPixmap(size, size)
-            circular_pixmap.fill(Qt.GlobalColor.transparent)
-
-            painter = QPainter(circular_pixmap)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-            path = QPainterPath()
-            path.addEllipse(0, 0, size, size)
-
-            painter.setClipPath(path)
-
-            # 缩放并绘制原始图片
-            scaled_pixmap = pixmap.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
-            painter.drawPixmap(0, 0, scaled_pixmap)
-            painter.end()
-
-            self.logo_loaded.emit(circular_pixmap)
-        except Exception as e:
-            get_logger().error(
-                f"Failed to load logo: error_type={type(e).__name__}"
-            )
-            self.logo_loaded.emit(QPixmap())
+LogoLoaderThread = ShopLogoLoader
 
 
 class AutoReplyThread(QThread):
@@ -56,6 +14,7 @@ class AutoReplyThread(QThread):
 
     connection_success = pyqtSignal()  # 连接成功信号
     connection_failed = pyqtSignal(str)  # 连接失败信号
+    ai_service_failed = pyqtSignal(str)  # AI 服务失效信号，仅通知商家端
 
     def __init__(self, account_data: dict):
         super().__init__()
@@ -77,6 +36,7 @@ class AutoReplyThread(QThread):
 
             # 创建 PDDChannel 实例
             self.channel = PDDChannel()
+            self.channel.ai_failure_callback = self.ai_service_failed.emit
 
             # 定义成功和失败的回调函数
             def on_success():
@@ -203,6 +163,58 @@ class AutoReplyThread(QThread):
         return self.isRunning()
 
 
+class LLMPreflightThread(QThread):
+    """启动自动回复前在后台验证当前 LLM 配置。"""
+
+    test_finished = pyqtSignal(bool, str)
+
+    def __init__(self, llm_config: dict, parent=None):
+        super().__init__(parent)
+        self.llm_config = llm_config
+
+    def run(self):
+        try:
+            asyncio.run(test_llm_connection(self.llm_config))
+            self.test_finished.emit(True, "AI API 配置有效。")
+        except Exception as exc:
+            self.test_finished.emit(False, llm_error_message(exc))
+
+
+class AccountIdentityThread(QThread):
+    """Backfill platform-reported main/sub-account identities."""
+
+    identities_updated = pyqtSignal(int)
+
+    def __init__(self, accounts: list[dict], parent=None):
+        super().__init__(parent)
+        self.accounts = accounts
+
+    def run(self):
+        from Channel.pinduoduo.utils.API.get_user_info import GetUserInfo
+        from service.account_service import account_service
+
+        updated = 0
+        for account in self.accounts:
+            if account.get("is_main_account") is not None or not account.get("cookies"):
+                continue
+            try:
+                details = GetUserInfo(account["cookies"]).get_user_details()
+                if details is False or details.get("mallOwner") is None:
+                    continue
+                if account_service.update_account_identity(
+                    account["channel_name"],
+                    account["shop_id"],
+                    account["user_id"],
+                    bool(details["mallOwner"]),
+                ):
+                    updated += 1
+            except Exception as exc:
+                get_logger("AccountIdentityThread").warning(
+                    f"账号身份识别失败: error_type={type(exc).__name__}"
+                )
+        self.identities_updated.emit(updated)
+
+
 class SetStatusThread(QThread):
     """设置账号状态的线程"""
 
@@ -263,4 +275,7 @@ class SetStatusThread(QThread):
             self.status_set_failed.emit(self.account_data, str(e))
 
 
-__all__ = ['LogoLoaderThread', 'AutoReplyThread', 'SetStatusThread']
+__all__ = [
+    'LogoLoaderThread', 'AutoReplyThread', 'LLMPreflightThread',
+    'AccountIdentityThread', 'SetStatusThread',
+]

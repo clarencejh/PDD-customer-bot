@@ -19,23 +19,11 @@ from PyQt6.QtCore import QTime
 from utils.logger_loguru import get_logger
 from config import LLMConfig, LLMProviderConfig, config, config_base
 from Agent.CustomerAgent.custom.llm_client import LLMClient
+from service.llm_service import llm_error_message
 
 
 def _llm_error_message(exc: Exception) -> str:
-    error_messages = {
-        "AuthenticationError": "API Key 无效或已过期。",
-        "PermissionDeniedError": "API Key 没有调用该模型的权限。",
-        "NotFoundError": "API 地址、模型接口或模型名称不存在。",
-        "BadRequestError": "请求被 API 拒绝，请检查模型名称和接口兼容性。",
-        "APITimeoutError": "连接 API 超时，请检查网络和 API 地址。",
-        "APIConnectionError": "无法连接 API，请检查网络、代理和 API 地址。",
-        "RateLimitError": "API 已连接，但当前触发了限流或额度不足。",
-    }
-    if type(exc).__name__ in error_messages:
-        return error_messages[type(exc).__name__]
-    if isinstance(exc, RuntimeError) and str(exc):
-        return str(exc)
-    return f"请求失败（{type(exc).__name__}）。"
+    return llm_error_message(exc)
 
 
 class LLMConnectionTestThread(QThread):
@@ -1088,5 +1076,4 @@ class SettingUI(QFrame):
             except Exception as e:
                 self.logger.error(f"重置配置失败: error_type={type(e).__name__}")
                 QMessageBox.critical(self, "重置失败", f"重置配置失败：{str(e)}")
-
 

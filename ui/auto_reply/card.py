@@ -1,9 +1,9 @@
 # 账号卡片组件模块
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import QLabel, QWidget, QHBoxLayout, QVBoxLayout
 from PyQt6.QtGui import QFont, QPixmap
 from qfluentwidgets import CardWidget, StrongBodyLabel, CaptionLabel, BodyLabel, PushButton, PrimaryPushButton, InfoBadge, FluentIcon as FIF
-from .threads import LogoLoaderThread
+from ui.logo_loader import ShopLogoLoader
 
 
 class AutoReplyCard(CardWidget):
@@ -22,9 +22,11 @@ class AutoReplyCard(CardWidget):
         self.shop_name = account_data.get("shop_name", "")
         self.shop_logo = account_data.get("shop_logo")
         self.account_name = account_data.get("username", "")
+        self.account_identity = self._account_identity_text(account_data.get("is_main_account"))
         self.platform = account_data.get("channel_name", "")
         self.status = self.getStatusText(account_data.get("status", 0))
         self.auto_reply_status = False  # 自动回复状态
+        self.auto_reply_pending = False  # 线程已启动但 WebSocket 尚未确认连接
         self.setupUI()
         self.connectSignals()
         self.loadLogo()
@@ -92,7 +94,7 @@ class AutoReplyCard(CardWidget):
         second_row = self.createInfoRow("店铺ID:", self.shop_id)
 
         # 第三行：账号名称
-        third_row = self.createInfoRow("账号:", self.account_name)
+        third_row = self.createInfoRow("账号:", self.account_name, self.account_identity)
 
         info_layout.addWidget(first_row)
         info_layout.addWidget(second_row)
@@ -101,7 +103,15 @@ class AutoReplyCard(CardWidget):
 
         return info_widget
 
-    def createInfoRow(self, label_text: str, value_text: str):
+    @staticmethod
+    def _account_identity_text(is_main_account) -> str:
+        if is_main_account is True:
+            return "主账号"
+        if is_main_account is False:
+            return "子账号"
+        return "身份未知"
+
+    def createInfoRow(self, label_text: str, value_text: str, tag_text: str = ""):
         """创建信息行"""
         row_widget = QWidget()
         row_layout = QHBoxLayout(row_widget)
@@ -117,6 +127,9 @@ class AutoReplyCard(CardWidget):
 
         row_layout.addWidget(label)
         row_layout.addWidget(value)
+        if tag_text:
+            tag = InfoBadge.success(tag_text, self) if tag_text == "主账号" else InfoBadge.warning(tag_text, self)
+            row_layout.addWidget(tag)
         row_layout.addStretch()
 
         return row_widget
@@ -204,6 +217,7 @@ class AutoReplyCard(CardWidget):
 
     def setAutoReplyStatus(self, is_running: bool):
         """设置自动回复状态"""
+        self.auto_reply_pending = False
         self.auto_reply_status = is_running
         if is_running:
             self.auto_reply_btn.setText("停止回复")
@@ -211,6 +225,16 @@ class AutoReplyCard(CardWidget):
         else:
             self.auto_reply_btn.setText("开始回复")
             self.auto_reply_btn.setIcon(FIF.ROBOT)
+        self.auto_reply_btn.setEnabled(True)
+
+    def setAutoReplyConnecting(self, connecting: bool):
+        """显示等待 WebSocket 连接结果的状态。"""
+        self.auto_reply_pending = connecting
+        if connecting:
+            self.auto_reply_btn.setText("连接中...")
+            self.auto_reply_btn.setEnabled(False)
+        else:
+            self.auto_reply_btn.setEnabled(True)
 
     def updateStatus(self, new_status: int):
         """更新账号状态"""
@@ -227,11 +251,9 @@ class AutoReplyCard(CardWidget):
     def loadLogo(self):
         """异步加载Logo"""
         if self.shop_logo:
-            def _start():
-                self.logo_loader_thread = LogoLoaderThread(self.shop_logo)
-                self.logo_loader_thread.logo_loaded.connect(self.setLogo)
-                self.logo_loader_thread.start()
-            QTimer.singleShot(200, _start)
+            self.logo_loader = ShopLogoLoader(self.shop_logo, self)
+            self.logo_loader.logo_loaded.connect(self.setLogo)
+            self.logo_loader.start()
         else:
             self.logo_label.setText("无Logo")
 
