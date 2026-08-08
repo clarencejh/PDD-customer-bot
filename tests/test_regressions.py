@@ -411,6 +411,11 @@ class OperationsUIStateRegressionTests(unittest.TestCase):
     def test_auto_reply_starts_by_default(self):
         self.assertTrue(ConfigModel().auto_start_reply)
 
+    def test_system_behavior_defaults_are_safe(self):
+        model = ConfigModel()
+        self.assertFalse(model.launch_at_login)
+        self.assertTrue(model.system_notifications)
+
     def test_platform_status_is_distinct_from_auto_reply_status(self):
         from ui.auto_reply.ui import OperationsUI
 
@@ -464,6 +469,118 @@ class OperationsUIStateRegressionTests(unittest.TestCase):
             OperationsUI._maybe_auto_start_reply(ui)
 
         start.assert_called_once_with(ui.accounts_data, interactive=False)
+
+
+class StartupServiceRegressionTests(unittest.TestCase):
+    def test_windows_run_key_round_trip(self):
+        from service.startup_service import APP_NAME, StartupService
+
+        class Key:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+        class Registry:
+            HKEY_CURRENT_USER = object()
+            KEY_READ = 1
+            KEY_SET_VALUE = 2
+            REG_SZ = 1
+            values = {}
+
+            @classmethod
+            def OpenKey(cls, *args):
+                if APP_NAME not in cls.values:
+                    raise FileNotFoundError
+                return Key()
+
+            @classmethod
+            def CreateKeyEx(cls, *args):
+                return Key()
+
+            @classmethod
+            def QueryValueEx(cls, key, name):
+                return cls.values[name], cls.REG_SZ
+
+            @classmethod
+            def SetValueEx(cls, key, name, reserved, value_type, value):
+                cls.values[name] = value
+
+            @classmethod
+            def DeleteValue(cls, key, name):
+                if name not in cls.values:
+                    raise FileNotFoundError
+                del cls.values[name]
+
+        service = StartupService(
+            platform_name="Windows",
+            executable=Path(r"C:\Program Files\Agent Customer\AgentCustomer.exe"),
+            frozen=True,
+            registry_module=Registry,
+        )
+
+        self.assertFalse(service.is_enabled())
+        service.set_enabled(True)
+        self.assertTrue(service.is_enabled())
+        self.assertIn('"C:\\Program Files\\Agent Customer\\AgentCustomer.exe"', Registry.values[APP_NAME])
+        service.set_enabled(False)
+        self.assertFalse(service.is_enabled())
+
+    def test_macos_launch_agent_round_trip(self):
+        from service.startup_service import StartupService
+
+        with TemporaryDirectory() as directory:
+            service = StartupService(
+                platform_name="Darwin",
+                home_dir=Path(directory),
+                executable=Path("/Applications/Agent Customer.app/Contents/MacOS/AgentCustomer"),
+                frozen=True,
+            )
+
+            self.assertFalse(service.is_enabled())
+            service.set_enabled(True)
+            self.assertTrue(service.is_enabled())
+            service.set_enabled(False)
+            self.assertFalse(service.is_enabled())
+
+    def test_development_launch_arguments_include_app_script(self):
+        from service.startup_service import StartupService
+
+        service = StartupService(
+            platform_name="Darwin",
+            executable=Path("/usr/bin/python3"),
+            app_script=Path("/tmp/Customer Agent/app.py"),
+            frozen=False,
+        )
+
+        self.assertEqual(
+            service.launch_arguments(),
+            ["/usr/bin/python3", "/tmp/Customer Agent/app.py"],
+        )
+
+    def test_unsupported_platform_is_rejected(self):
+        from service.startup_service import StartupRegistrationError, StartupService
+
+        service = StartupService(platform_name="Linux")
+        with self.assertRaisesRegex(StartupRegistrationError, "不支持"):
+            service.set_enabled(True)
+
+
+class SystemNotificationRegressionTests(unittest.TestCase):
+    def test_notification_helper_dispatches_to_application_service(self):
+        from service.system_notification_service import notify_system
+
+        notifier = mock.Mock()
+        notifier.notify.return_value = True
+        with mock.patch(
+            "service.system_notification_service.get_system_notifier",
+            return_value=notifier,
+        ):
+            result = notify_system("连接失败", "账号已离线", "warning")
+
+        self.assertTrue(result)
+        notifier.notify.assert_called_once_with("连接失败", "账号已离线", "warning")
 
 
 class ToolScopeRegressionTests(unittest.TestCase):

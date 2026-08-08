@@ -89,5 +89,16 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopico
 ; 安装完成后可选直接运行
 Filename: "{app}\{#AppExe}"; Description: "启动 {#AppName}"; Flags: nowait postinstall skipifsilent
 
-; 不配置 [UninstallDelete]：数据库、日志、配置和浏览器登录态位于用户数据目录，
-; 卸载程序必须保留这些用户数据，避免误删历史会话和凭据。
+[Code]
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+    RegDeleteValue(
+      HKEY_CURRENT_USER,
+      'Software\Microsoft\Windows\CurrentVersion\Run',
+      '{#AppName}'
+    );
+end;
+
+// 不配置 [UninstallDelete]：数据库、日志、配置和浏览器登录态位于用户数据目录，
+// 卸载程序必须保留这些用户数据，避免误删历史会话和凭据。

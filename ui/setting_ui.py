@@ -20,6 +20,8 @@ from utils.logger_loguru import get_logger
 from config import LLMConfig, LLMProviderConfig, config, config_base
 from Agent.CustomerAgent.custom.llm_client import LLMClient
 from service.llm_service import llm_error_message
+from service.startup_service import startup_service
+from service.system_notification_service import get_system_notifier
 
 
 def _llm_error_message(exc: Exception) -> str:
@@ -608,6 +610,44 @@ class BusinessHoursCard(CardWidget):
         self.auto_start_reply_switch.setChecked(config.get("auto_start_reply", True))
 
 
+class SystemBehaviorCard(CardWidget):
+    """系统启动与通知设置。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(16)
+
+        title_label = StrongBodyLabel("系统行为")
+        title_label.setFont(QFont("Microsoft YaHei", 12, QFont.Weight.Bold))
+        layout.addWidget(title_label)
+
+        form_layout = QFormLayout()
+        form_layout.setSpacing(12)
+        form_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        form_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        self.launch_at_login_switch = SwitchButton()
+        self.system_notifications_switch = SwitchButton()
+        self.system_notifications_switch.setChecked(True)
+        form_layout.addRow("登录系统后自动启动:", self.launch_at_login_switch)
+        form_layout.addRow("启用系统通知:", self.system_notifications_switch)
+        layout.addLayout(form_layout)
+
+    def getConfig(self) -> dict:
+        return {
+            "launch_at_login": self.launch_at_login_switch.isChecked(),
+            "system_notifications": self.system_notifications_switch.isChecked(),
+        }
+
+    def setConfig(self, values: dict) -> None:
+        self.launch_at_login_switch.setChecked(values.get("launch_at_login", False))
+        self.system_notifications_switch.setChecked(
+            values.get("system_notifications", True)
+        )
+
+
 class SettingUI(QFrame):
     """设置界面"""
 
@@ -725,11 +765,13 @@ class SettingUI(QFrame):
         self.llm_config_card = LLMConfigCard()
         self.prompt_config_card = PromptConfigCard()
         self.business_hours_card = BusinessHoursCard()
+        self.system_behavior_card = SystemBehaviorCard()
 
         # 添加到布局
         content_layout.addWidget(self.llm_config_card)
         content_layout.addWidget(self.prompt_config_card)
         content_layout.addWidget(self.business_hours_card)
+        content_layout.addWidget(self.system_behavior_card)
         content_layout.addStretch()
 
         # 设置容器样式
@@ -764,6 +806,8 @@ class SettingUI(QFrame):
                     "end": config.get("business_hours.end", "23:00")
                 },
                 "auto_start_reply": config.get("auto_start_reply", True),
+                "launch_at_login": self._readLaunchAtLogin(),
+                "system_notifications": config.get("system_notifications", True),
             }
 
             # 验证并设置配置
@@ -804,6 +848,8 @@ class SettingUI(QFrame):
             }),
             "business_hours": config_data.get("business_hours", {"start": "08:00", "end": "23:00"}),
             "auto_start_reply": config_data.get("auto_start_reply", True),
+            "launch_at_login": config_data.get("launch_at_login", False),
+            "system_notifications": config_data.get("system_notifications", True),
         }
 
         # 验证business_hours格式
@@ -837,14 +883,30 @@ class SettingUI(QFrame):
             "business_hours": business_hours_config,
             "auto_start_reply": validated_config["auto_start_reply"],
         })
+        self.system_behavior_card.setConfig({
+            "launch_at_login": validated_config["launch_at_login"],
+            "system_notifications": validated_config["system_notifications"],
+        })
+
+    def _readLaunchAtLogin(self) -> bool:
+        try:
+            return startup_service.is_enabled()
+        except Exception as exc:
+            self.logger.warning(
+                f"读取登录启动状态失败: error_type={type(exc).__name__}"
+            )
+            return config.get("launch_at_login", False)
 
     def onSaveConfig(self):
         """保存配置到config模块"""
+        startup_previous = None
+        startup_changed = False
         try:
             # 获取各配置卡片的配置
             providers, active_provider_id, llm_config = self._validatedProviderBundle()
             prompt_config = self.prompt_config_card.getConfig()
             business_config = self.business_hours_card.getConfig()
+            system_config = self.system_behavior_card.getConfig()
 
             # 合并配置为新的结构
             new_config = {
@@ -854,6 +916,8 @@ class SettingUI(QFrame):
                 "prompt": prompt_config,
                 "business_hours": business_config.get("businessHours", {"start": "08:00", "end": "23:00"}),
                 "auto_start_reply": business_config.get("auto_start_reply", True),
+                "launch_at_login": system_config["launch_at_login"],
+                "system_notifications": system_config["system_notifications"],
                 # 保持与旧配置的兼容性
                 "db_path": config.get("db_path") or "./temp/channel_shop.db"
             }
@@ -866,8 +930,21 @@ class SettingUI(QFrame):
                 QMessageBox.warning(self, "时间设置错误", "开始时间和结束时间不能相同！")
                 return
 
+            startup_previous = startup_service.is_enabled()
+            if startup_previous != system_config["launch_at_login"]:
+                startup_service.set_enabled(system_config["launch_at_login"])
+                startup_changed = True
+
             # 使用config模块保存配置
             config.update(new_config, save=True)
+            notifier = get_system_notifier()
+            if notifier is not None:
+                try:
+                    notifier.refresh_visibility(system_config["system_notifications"])
+                except Exception as exc:
+                    self.logger.warning(
+                        f"刷新系统通知状态失败: error_type={type(exc).__name__}"
+                    )
 
             self.logger.info("配置保存成功")
 
@@ -883,8 +960,18 @@ class SettingUI(QFrame):
             )
 
         except ValueError as e:
+            if startup_changed and startup_previous is not None:
+                try:
+                    startup_service.set_enabled(startup_previous)
+                except Exception:
+                    self.logger.error("登录启动设置回滚失败")
             QMessageBox.warning(self, "配置错误", str(e))
         except Exception as e:
+            if startup_changed and startup_previous is not None:
+                try:
+                    startup_service.set_enabled(startup_previous)
+                except Exception:
+                    self.logger.error("登录启动设置回滚失败")
             self.logger.error(f"保存配置失败: error_type={type(e).__name__}")
             QMessageBox.critical(self, "保存失败", f"保存配置时发生错误：{str(e)}")
 

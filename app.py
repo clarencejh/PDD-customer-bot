@@ -69,6 +69,14 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Agent-Customer")
 
+    from service.system_notification_service import (
+        SystemNotificationService,
+        notify_system,
+    )
+    app.system_notifier = SystemNotificationService()
+    app.system_notifier.refresh_visibility()
+    app.aboutToQuit.connect(app.system_notifier.shutdown)
+
     # 创建主窗口
     logger = _get_logger("App")
     logger.info("应用程序启动...")
@@ -79,12 +87,17 @@ def main():
     logger.info(f"  MainWindow 模块导入耗时: {time.perf_counter() - t_import:.2f}s")
     t_window = time.perf_counter()
     window = MainWindow()
+    app.system_notifier.attach_window(window)
     window.show()
     logger.info(f"  MainWindow 实例化耗时: {time.perf_counter() - t_window:.2f}s")
     logger.info(f"窗口创建与显示总耗时: {time.perf_counter() - t0:.2f}s")
 
     # 将窗口设为应用级别的变量，防止被垃圾回收
     app.main_window = window
+    QTimer.singleShot(
+        1500,
+        lambda: notify_system("Agent-Customer", "软件已启动。"),
+    )
 
     # 运行 Qt 事件循环
     sys.exit(app.exec())

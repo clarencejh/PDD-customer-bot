@@ -122,6 +122,14 @@ class ConfigModel(BaseModel):
         default=True,
         description="软件启动后自动开启在线账号的自动回复",
     )
+    launch_at_login: bool = Field(
+        default=False,
+        description="用户登录系统后自动启动软件",
+    )
+    system_notifications: bool = Field(
+        default=True,
+        description="启用系统托盘通知",
+    )
     db_path: str = Field(default="./temp/channel_shop.db", description="数据库路径")
 
     @model_validator(mode="after")
@@ -149,6 +157,8 @@ config_base = {
     },
     "active_llm_provider": "default",
     "auto_start_reply": True,
+    "launch_at_login": False,
+    "system_notifications": True,
     "llm_providers": [
         {
             "id": "default",

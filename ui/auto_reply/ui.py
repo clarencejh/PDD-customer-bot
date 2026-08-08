@@ -35,6 +35,7 @@ from qfluentwidgets import (
 from config import config
 from service.account_service import account_service
 from service.llm_service import validate_llm_config
+from service.system_notification_service import notify_system
 from utils.logger_loguru import get_logger
 from .manager import auto_reply_manager
 from .threads import AccountIdentityThread, LLMPreflightThread
@@ -541,6 +542,7 @@ class OperationsUI(QFrame):
                 QMessageBox.warning(self, "AI 服务不可用", f"无法开启自动回复：{message}")
             else:
                 self.logger.warning(f"启动时自动开启回复失败: {message}")
+                notify_system("自动回复启动失败", message, "warning")
             return
         started = 0
         for account in accounts:
@@ -551,7 +553,7 @@ class OperationsUI(QFrame):
             )
             if auto_reply_manager.start_auto_reply(
                 account,
-                on_connection_success=lambda: self.refresh_runtime_state(),
+                on_connection_success=lambda data=account: self._on_reply_connected(data),
                 on_connection_failed=connection_failed,
                 on_ai_service_failed=lambda error, data=account: self._on_ai_failed(data, error),
             ):
@@ -563,13 +565,31 @@ class OperationsUI(QFrame):
     def _on_reply_failed(self, account, error):
         account["last_error"] = error
         self.refresh_runtime_state()
+        notify_system(
+            "自动回复连接失败",
+            f"账号 {account.get('username', '')}：{error}",
+            "warning",
+        )
         QMessageBox.warning(self, "自动回复连接失败", f"账号 {account.get('username', '')}：{error}")
+
+    def _on_reply_connected(self, account):
+        account["last_error"] = ""
+        self.refresh_runtime_state()
+        notify_system(
+            "自动回复已连接",
+            f"账号 {account.get('username', '')} 已开始自动回复。",
+        )
 
     def _on_startup_reply_failed(self, account, error):
         account["last_error"] = error
         self.refresh_runtime_state()
         self.logger.warning(
             f"启动时自动开启回复连接失败: account={self.account_key(account)}, error={error}"
+        )
+        notify_system(
+            "自动回复连接失败",
+            f"账号 {account.get('username', '')}：{error}",
+            "warning",
         )
 
     def _on_ai_failed(self, account, error):
@@ -580,6 +600,11 @@ class OperationsUI(QFrame):
         auto_reply_manager.stop_auto_reply(account)
         account["last_error"] = error
         self.refresh_runtime_state()
+        notify_system(
+            "AI 服务已失效",
+            f"账号 {account.get('username', '')} 已停止自动回复：{error}",
+            "critical",
+        )
         QMessageBox.warning(self, "AI 服务已失效", f"账号 {account.get('username', '')} 已停止自动回复：{error}")
 
     def add_account(self):
