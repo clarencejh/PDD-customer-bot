@@ -5,11 +5,11 @@ import os
 import asyncio
 import copy
 import uuid
-from PyQt6.QtCore import Qt, pyqtSignal, QThread
+from PyQt6.QtCore import Qt, pyqtSignal, QThread, QUrl
 from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QVBoxLayout, QWidget, QLabel,
                             QFormLayout, QGroupBox, QMessageBox, QDialog,
                             QListWidgetItem)
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QDesktopServices, QFont
 from qfluentwidgets import (CardWidget, SubtitleLabel, CaptionLabel, BodyLabel,
                            PrimaryPushButton, PushButton, StrongBodyLabel,
                            LineEdit, ComboBox, ScrollArea, FluentIcon as FIF,
@@ -20,6 +20,7 @@ from utils.logger_loguru import get_logger
 from config import LLMConfig, LLMProviderConfig, config, config_base
 from Agent.CustomerAgent.custom.llm_client import LLMClient
 from service.llm_service import llm_error_message
+from service.data_maintenance_service import data_maintenance_service
 from service.startup_service import startup_service
 from service.system_notification_service import get_system_notifier
 
@@ -56,6 +57,24 @@ class LLMConnectionTestThread(QThread):
             await client.test_connection()
         finally:
             await client.close()
+
+
+class MaintenanceWorker(QThread):
+    """Run filesystem/database cleanup without blocking the settings UI."""
+
+    task_finished = pyqtSignal(str, object)
+    task_failed = pyqtSignal(str, str)
+
+    def __init__(self, action: str, callback, parent=None):
+        super().__init__(parent)
+        self.action = action
+        self.callback = callback
+
+    def run(self):
+        try:
+            self.task_finished.emit(self.action, self.callback())
+        except Exception as exc:
+            self.task_failed.emit(self.action, str(exc))
 
 
 class LLMBatchTestThread(QThread):
@@ -648,6 +667,50 @@ class SystemBehaviorCard(CardWidget):
         )
 
 
+class DataManagementCard(CardWidget):
+    """运行数据位置与清理入口。"""
+
+    def __init__(self, data_path: str, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(12)
+
+        title_label = StrongBodyLabel("数据管理")
+        title_label.setFont(QFont("Microsoft YaHei", 12, QFont.Weight.Bold))
+        layout.addWidget(title_label)
+
+        self.path_edit = LineEdit()
+        self.path_edit.setReadOnly(True)
+        self.path_edit.setText(data_path)
+        layout.addWidget(self.path_edit)
+
+        description = CaptionLabel(
+            "配置、账号登录态、知识库和聊天记录保存在此目录；清理缓存和日志不会删除这些数据。"
+        )
+        description.setStyleSheet("color: #667085;")
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        actions = QHBoxLayout()
+        self.open_directory_btn = PushButton("打开数据目录")
+        self.open_directory_btn.setIcon(FIF.FOLDER)
+        self.clear_cache_btn = PushButton("清理缓存和日志")
+        self.clear_cache_btn.setIcon(FIF.BROOM)
+        self.clear_history_btn = PushButton("清空聊天记录")
+        self.clear_history_btn.setIcon(FIF.DELETE)
+        actions.addWidget(self.open_directory_btn)
+        actions.addWidget(self.clear_cache_btn)
+        actions.addWidget(self.clear_history_btn)
+        actions.addStretch()
+        layout.addLayout(actions)
+
+    def setActionsEnabled(self, enabled: bool) -> None:
+        self.open_directory_btn.setEnabled(enabled)
+        self.clear_cache_btn.setEnabled(enabled)
+        self.clear_history_btn.setEnabled(enabled)
+
+
 class SettingUI(QFrame):
     """设置界面"""
 
@@ -657,6 +720,7 @@ class SettingUI(QFrame):
         self.connection_test_thread = None
         self.batch_test_thread = None
         self.model_fetch_thread = None
+        self.maintenance_worker = None
         self._task_provider_id = None
         self._batch_initial_results = {}
         self.setupUI()
@@ -664,6 +728,10 @@ class SettingUI(QFrame):
 
         # 设置对象名
         self.setObjectName("设置")
+
+    def closeEvent(self, event):
+        # 维护任务在后台运行，不在窗口关闭事件中无限等待。
+        super().closeEvent(event)
 
     def setupUI(self):
         """设置主界面UI"""
@@ -684,6 +752,15 @@ class SettingUI(QFrame):
         self.llm_config_card.test_btn.clicked.connect(self.onTestConnection)
         self.llm_config_card.batch_test_btn.clicked.connect(self.onBatchTestConnections)
         self.llm_config_card.fetch_models_btn.clicked.connect(self.onFetchModels)
+        self.data_management_card.open_directory_btn.clicked.connect(
+            self.openDataDirectory
+        )
+        self.data_management_card.clear_cache_btn.clicked.connect(
+            self.clearCacheAndLogs
+        )
+        self.data_management_card.clear_history_btn.clicked.connect(
+            self.clearConversationHistory
+        )
 
         # 添加到主布局
         main_layout.addWidget(header_widget)
@@ -766,12 +843,16 @@ class SettingUI(QFrame):
         self.prompt_config_card = PromptConfigCard()
         self.business_hours_card = BusinessHoursCard()
         self.system_behavior_card = SystemBehaviorCard()
+        self.data_management_card = DataManagementCard(
+            str(data_maintenance_service.ensure_data_directory())
+        )
 
         # 添加到布局
         content_layout.addWidget(self.llm_config_card)
         content_layout.addWidget(self.prompt_config_card)
         content_layout.addWidget(self.business_hours_card)
         content_layout.addWidget(self.system_behavior_card)
+        content_layout.addWidget(self.data_management_card)
         content_layout.addStretch()
 
         # 设置容器样式
@@ -896,6 +977,109 @@ class SettingUI(QFrame):
                 f"读取登录启动状态失败: error_type={type(exc).__name__}"
             )
             return config.get("launch_at_login", False)
+
+    def openDataDirectory(self):
+        path = data_maintenance_service.ensure_data_directory()
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+            QMessageBox.warning(self, "打开失败", f"无法打开数据目录：{path}")
+
+    def clearCacheAndLogs(self):
+        reply = QMessageBox.question(
+            self,
+            "确认清理缓存和日志",
+            "将删除运行日志和可重建的浏览器缓存。\n"
+            "配置、账号登录态、知识库和聊天记录会保留。是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._runMaintenance(
+                "cache",
+                data_maintenance_service.clear_cache_and_logs,
+            )
+
+    def clearConversationHistory(self):
+        from ui.auto_reply.manager import auto_reply_manager
+
+        if auto_reply_manager.get_running_count():
+            QMessageBox.warning(
+                self,
+                "无法清理",
+                "请先停止所有自动回复，再清空聊天记录。",
+            )
+            return
+        reply = QMessageBox.question(
+            self,
+            "确认清空聊天记录",
+            "将永久删除全部客户对话归档和 Agent 会话历史。\n"
+            "账号、配置和知识库不会删除。此操作无法撤销，是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._runMaintenance(
+                "history",
+                data_maintenance_service.clear_conversation_history,
+            )
+
+    def _runMaintenance(self, action: str, callback):
+        if self.maintenance_worker and self.maintenance_worker.isRunning():
+            return
+        self.data_management_card.setActionsEnabled(False)
+        worker = MaintenanceWorker(action, callback, self)
+        self.maintenance_worker = worker
+        worker.task_finished.connect(self._onMaintenanceFinished)
+        worker.task_failed.connect(self._onMaintenanceFailed)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _onMaintenanceFinished(self, action: str, result):
+        self.maintenance_worker = None
+        self.data_management_card.setActionsEnabled(True)
+        if action == "cache":
+            freed = self._formatBytes(result.removed_bytes)
+            message = (
+                f"已释放 {freed}，删除 {result.removed_files} 个文件、"
+                f"{result.removed_directories} 个缓存目录。"
+            )
+            log_view = getattr(self.window(), "log_view", None)
+            if log_view is not None:
+                log_view.log_display.clear_all()
+        else:
+            message = f"已清空 {result.removed_rows} 条聊天及 Agent 会话记录。"
+            conversation_view = getattr(self.window(), "conversation_view", None)
+            if conversation_view is not None:
+                conversation_view.refresh(force=True)
+        if result.errors:
+            QMessageBox.warning(
+                self,
+                "部分清理未完成",
+                f"{message}\n另有 {len(result.errors)} 项因文件占用或权限不足未能删除。",
+            )
+            return
+        InfoBar.success(
+            title="清理完成",
+            content=message,
+            orient=Qt.Orientation.Horizontal,
+            isClosable=True,
+            position=InfoBarPosition.TOP,
+            duration=3000,
+            parent=self,
+        )
+
+    def _onMaintenanceFailed(self, action: str, error: str):
+        self.maintenance_worker = None
+        self.data_management_card.setActionsEnabled(True)
+        QMessageBox.critical(self, "清理失败", error)
+
+    @staticmethod
+    def _formatBytes(size: int) -> str:
+        value = float(size)
+        for unit in ("B", "KB", "MB", "GB"):
+            if value < 1024 or unit == "GB":
+                return f"{value:.1f} {unit}"
+            value /= 1024
+        return f"{value:.1f} GB"
 
     def onSaveConfig(self):
         """保存配置到config模块"""

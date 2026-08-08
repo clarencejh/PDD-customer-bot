@@ -10,7 +10,9 @@
 """
 from __future__ import annotations
 import asyncio
+import csv
 import os
+from pathlib import Path
 from typing import TYPE_CHECKING, Optional, List, Dict
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -18,11 +20,11 @@ from PyQt6.QtWidgets import (
     QPushButton, QMessageBox, QDialog, QDialogButtonBox, QInputDialog,
     QLineEdit, QTextEdit, QCheckBox, QProgressBar, QFrame, QFileDialog
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QThread
+from PyQt6.QtCore import Qt, pyqtSignal, QThread, QStandardPaths
 from qfluentwidgets import (
     PrimaryPushButton, PushButton,
     InfoBar, InfoBarPosition, TableWidget, SegmentedWidget,
-    ComboBox,
+    ComboBox, CaptionLabel, FluentIcon as FIF,
 )
 
 from core.di_container import container
@@ -85,6 +87,28 @@ class SyncWorker(QThread):
 
         loop.close()
         self.sync_finished.emit(result.success, result.failed, result.cancelled)
+
+
+class ImportWorker(QThread):
+    """在后台解析并批量写入客服知识，避免大文件阻塞界面。"""
+    import_finished = pyqtSignal(int, int, int)  # 成功、跳过、解析跳过
+    import_failed = pyqtSignal(str)
+
+    def __init__(self, service, shop_id: int, filepath: str, parent=None):
+        super().__init__(parent)
+        self.service = service
+        self.shop_id = shop_id
+        self.filepath = filepath
+
+    def run(self):
+        try:
+            rows, parse_skipped = KnowledgeUI._parse_import_file(self.filepath)
+            success, import_skipped = self.service.batch_import_customer_service(
+                self.shop_id, rows
+            )
+            self.import_finished.emit(success, import_skipped, parse_skipped)
+        except Exception as exc:
+            self.import_failed.emit(str(exc))
 
 
 class ProductDetailDialog(QDialog):
@@ -250,6 +274,9 @@ class CsAddEditDialog(QDialog):
 class KnowledgeUI(QWidget):
     """知识库管理主界面"""
 
+    IMPORT_TEMPLATE_HEADERS = ("一级分类", "二级分类", "话术标题", "话术内容")
+    SUPPORTED_IMPORT_EXTENSIONS = {".csv", ".xlsx", ".xls"}
+
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setObjectName('KnowledgeUI')
@@ -269,6 +296,7 @@ class KnowledgeUI(QWidget):
         self._cs_loaded = False
         # 标签缓存，避免重复重建下拉框
         self._last_cs_tags: tuple = ()
+        self._import_worker = None
 
         self._init_ui()
         self._load_shops()
@@ -458,14 +486,25 @@ class KnowledgeUI(QWidget):
         self.tag_combo.currentIndexChanged.connect(self._on_tag_filter_changed)
 
         self.batch_import_btn = PushButton("批量导入")
+        self.batch_import_btn.setIcon(FIF.FOLDER_ADD)
         self.batch_import_btn.clicked.connect(self._on_batch_import_clicked)
+        self.download_template_btn = PushButton("下载模板")
+        self.download_template_btn.setIcon(FIF.DOWNLOAD)
+        self.download_template_btn.clicked.connect(self._on_download_template_clicked)
 
         toolbar.addWidget(self.add_cs_btn)
         toolbar.addWidget(self.batch_import_btn)
+        toolbar.addWidget(self.download_template_btn)
         toolbar.addStretch()
         toolbar.addWidget(self.tag_label)
         toolbar.addWidget(self.tag_combo)
         layout.addLayout(toolbar)
+
+        self.import_format_label = CaptionLabel(
+            "导入格式：CSV、Excel（.xlsx、.xls）"
+        )
+        self.import_format_label.setStyleSheet("color: #667085;")
+        layout.addWidget(self.import_format_label)
 
         # 客服知识表格
         self.cs_table = TableWidget()
@@ -847,32 +886,82 @@ class KnowledgeUI(QWidget):
             self,
             "选择客服话术文件",
             "",
-            "Excel 文件 (*.xls *.xlsx)",
+            "支持的文件 (*.csv *.xlsx *.xls);;CSV 文件 (*.csv);;Excel 文件 (*.xlsx *.xls)",
         )
         if not filepath:
             return
 
-        try:
-            rows, parse_skipped = self._parse_excel(filepath)
-        except Exception as e:
-            self._show_message("error", f"文件读取失败: {e}")
-            return
-
-        success, import_skipped = self.knowledge_service.batch_import_customer_service(
-            self.current_shop_id, rows
+        self.batch_import_btn.setEnabled(False)
+        self.download_template_btn.setEnabled(False)
+        self._import_worker = ImportWorker(
+            self.knowledge_service, self.current_shop_id, filepath, self
         )
+        self._import_worker.import_finished.connect(self._on_import_finished)
+        self._import_worker.import_failed.connect(self._on_import_failed)
+        self._import_worker.finished.connect(self._on_import_thread_finished)
+        self._import_worker.finished.connect(self._import_worker.deleteLater)
+        self._import_worker.start()
+
+    def _on_import_finished(self, success: int, import_skipped: int, parse_skipped: int):
         total_skipped = parse_skipped + import_skipped
         self._show_message("success", f"导入完成：成功 {success} 条，跳过 {total_skipped} 条")
         self._refresh_cs_table()
 
-    def _parse_excel(self, filepath: str) -> tuple[list, int]:
-        """解析 Excel 文件，返回 (有效行列表, 跳过行数)
+    def _on_import_failed(self, message: str):
+        self._show_message("error", f"文件读取或导入失败: {message}")
+
+    def _on_import_thread_finished(self):
+        self.batch_import_btn.setEnabled(True)
+        self.download_template_btn.setEnabled(True)
+        self._import_worker = None
+
+    def _on_download_template_clicked(self):
+        """导出 UTF-8 BOM CSV 模板，兼容 Windows Excel 中文显示。"""
+        download_dir = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.DownloadLocation
+        )
+        default_path = os.path.join(download_dir, "客服知识导入模板.csv")
+        filepath, _ = QFileDialog.getSaveFileName(
+            self,
+            "保存客服知识导入模板",
+            default_path,
+            "CSV 文件 (*.csv)",
+        )
+        if not filepath:
+            return
+        if Path(filepath).suffix.lower() != ".csv":
+            filepath += ".csv"
+        try:
+            self._write_csv_template(filepath)
+        except Exception as exc:
+            self._show_message("error", f"模板保存失败: {exc}")
+            return
+        self._show_message("success", f"模板已保存：{filepath}")
+
+    @classmethod
+    def _write_csv_template(cls, filepath: str) -> None:
+        with open(filepath, "w", encoding="utf-8-sig", newline="") as file:
+            csv.writer(file).writerow(cls.IMPORT_TEMPLATE_HEADERS)
+
+    @classmethod
+    def _parse_import_file(cls, filepath: str) -> tuple[list, int]:
+        """解析 CSV 或 Excel 文件，返回 (有效行列表, 跳过行数)。
 
         列顺序：0=一级分类, 1=二级分类, 2=话术标题, 3=话术内容
         """
         import pandas as pd
 
-        df = pd.read_excel(filepath, header=0, dtype=str)
+        suffix = Path(filepath).suffix.lower()
+        if suffix not in cls.SUPPORTED_IMPORT_EXTENSIONS:
+            supported = ", ".join(sorted(cls.SUPPORTED_IMPORT_EXTENSIONS))
+            raise ValueError(f"不支持的文件格式，当前支持: {supported}")
+        if suffix == ".csv":
+            try:
+                df = pd.read_csv(filepath, header=0, dtype=str, encoding="utf-8-sig")
+            except UnicodeDecodeError:
+                df = pd.read_csv(filepath, header=0, dtype=str, encoding="gb18030")
+        else:
+            df = pd.read_excel(filepath, header=0, dtype=str)
         df = df.fillna("")
 
         rows = []
@@ -896,6 +985,10 @@ class KnowledgeUI(QWidget):
             rows.append({"title": title, "content": content, "tags": tags})
 
         return rows, skipped
+
+    def _parse_excel(self, filepath: str) -> tuple[list, int]:
+        """兼容旧调用方，统一交由批量导入解析器处理。"""
+        return self._parse_import_file(filepath)
 
     def _on_edit_cs(self, row: int):
         """编辑客服知识"""

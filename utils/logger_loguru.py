@@ -8,6 +8,7 @@
 import os
 import sys
 import json
+import threading
 import uuid
 from datetime import datetime
 from typing import Any, Dict, Optional, Union
@@ -66,18 +67,49 @@ if not is_frozen:
         diagnose=not is_frozen
     )
 
-# 添加文件处理器（自动轮转和压缩）
-logger.add(
-    DEFAULT_LOG_FILE,
-    format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}",
-    level=log_level.upper(),
-    rotation=MAX_LOG_SIZE,
-    retention=BACKUP_COUNT,
-    compression="zip",
-    encoding="utf-8",
-    backtrace=True,
-    diagnose=not is_frozen
-)
+_FILE_HANDLER_LOCK = threading.RLock()
+
+
+def _add_file_handler() -> int:
+    return logger.add(
+        DEFAULT_LOG_FILE,
+        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}",
+        level=log_level.upper(),
+        rotation=MAX_LOG_SIZE,
+        retention=BACKUP_COUNT,
+        compression="zip",
+        encoding="utf-8",
+        backtrace=True,
+        diagnose=not is_frozen,
+    )
+
+
+_FILE_HANDLER_ID = _add_file_handler()
+
+
+def clear_log_files() -> tuple[int, int, list[str]]:
+    """Delete persisted logs and reopen the file sink for continued logging."""
+    global _FILE_HANDLER_ID
+    removed_files = 0
+    removed_bytes = 0
+    errors = []
+    log_dir = Path(DEFAULT_LOG_FILE).parent
+    with _FILE_HANDLER_LOCK:
+        logger.remove(_FILE_HANDLER_ID)
+        try:
+            for path in log_dir.iterdir() if log_dir.exists() else ():
+                if not path.is_file():
+                    continue
+                try:
+                    removed_bytes += path.stat().st_size
+                    path.unlink()
+                    removed_files += 1
+                except OSError as exc:
+                    errors.append(f"{path.name}: {exc}")
+        finally:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            _FILE_HANDLER_ID = _add_file_handler()
+    return removed_files, removed_bytes, errors
 
 # 全局logger对象（保持向后兼容）
 app_logger = logger
@@ -107,7 +139,15 @@ def get_logger(name=None):
     return logger.bind(module=name)
 
 # 导出全局日志对象和获取logger的函数
-__all__ = ["logger", "app_logger", "get_logger", "BusinessLogger", "get_business_logger", "log_with_ctx"]
+__all__ = [
+    "logger",
+    "app_logger",
+    "get_logger",
+    "clear_log_files",
+    "BusinessLogger",
+    "get_business_logger",
+    "log_with_ctx",
+]
 
 class BusinessLogger:
     """业务日志记录器，基于loguru实现"""

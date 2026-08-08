@@ -69,20 +69,8 @@ class AutoReplyManager:
             thread = self.running_accounts[account_key]
             thread.stop()
 
-            # 等待线程结束后再从列表中移除
-            if thread.isRunning():
-                thread.wait(5000)  # 最多等待5秒
-
-            if thread.isRunning():
-                self.logger.warning(
-                    f"账号 {account_data['username']} 停止超时，保留线程引用以防重复启动"
-                )
-                return False
-
-            # 线程已结束后再移除引用
-            self.running_accounts.pop(account_key, None)
-
-            self.logger.info(f"账号 {account_data['username']} (店铺: {account_data['shop_id']}) 自动回复已停止")
+            # 停止请求是异步的，引用由 finished 信号统一清理，避免阻塞 GUI。
+            self.logger.info(f"已提交停止账号 {account_data['username']} (店铺: {account_data['shop_id']}) 自动回复")
             return True
 
         except Exception as e:
@@ -185,16 +173,8 @@ class AutoReplyManager:
                 if thread.isRunning():
                     thread.stop()
 
-            for thread in list(self.running_accounts.values()):
-                thread.wait(5000)
-
-            for account_key, thread in list(self.running_accounts.items()):
-                try:
-                    if not thread.isRunning():
-                        self.running_accounts.pop(account_key, None)
-                except Exception:
-                    self.running_accounts.pop(account_key, None)
-            self.logger.info("所有自动回复任务已停止")
+            # 不等待线程，finished 信号会清理引用；调用方可通过 is_running 轮询。
+            self.logger.info("已提交停止所有自动回复任务")
 
         except Exception as e:
             self.logger.error(f"停止所有自动回复失败: error_type={type(e).__name__}")

@@ -41,6 +41,9 @@ class MainWindow(FluentWindow):
         self.about_view = None
         self.help_view = None
         self.conversation_view = None
+        self._force_quit = False
+        self._quit_pending = False
+        self._background_notice_shown = False
 
         t = time.perf_counter()
         # 立即初始化导航和窗口
@@ -139,14 +142,48 @@ class MainWindow(FluentWindow):
         # 最后最大化显示
         self.showMaximized()
 
-    def closeEvent(self, a0):
-        """ 重写窗口关闭事件，确保后台线程安全退出 """
-
-        # 停止所有自动回复线程
+    def request_quit(self):
+        """从托盘发起真正退出，异步等待自动回复线程结束。"""
+        if self._quit_pending:
+            return
+        self._force_quit = True
+        self._quit_pending = True
         try:
             from ui.auto_reply_ui import auto_reply_manager
             auto_reply_manager.stop_all()
-        except Exception:
-            pass
+        except Exception as exc:
+            self.logger.warning(f"停止自动回复失败: {exc}")
+        self._wait_for_workers_to_quit()
 
-        super().closeEvent(a0) 
+    def _wait_for_workers_to_quit(self):
+        from PyQt6.QtWidgets import QApplication
+        try:
+            from ui.auto_reply_ui import auto_reply_manager
+            running = auto_reply_manager.get_running_count()
+        except Exception:
+            running = 0
+        if running:
+            QTimer.singleShot(100, self._wait_for_workers_to_quit)
+            return
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+
+    def closeEvent(self, event):
+        """关闭按钮隐藏到托盘；只有托盘菜单的退出才结束进程。"""
+        from PyQt6.QtWidgets import QSystemTrayIcon
+        tray_available = QSystemTrayIcon.isSystemTrayAvailable()
+        if not self._force_quit and tray_available:
+            event.ignore()
+            self.hide()
+            if not self._background_notice_shown:
+                self._background_notice_shown = True
+                from service.system_notification_service import notify_system
+                notify_system("Agent-Customer", "窗口已隐藏，自动回复仍在后台运行。")
+            return
+        if not self._force_quit:
+            # 无托盘环境无法恢复隐藏窗口，直接走异步退出流程。
+            event.accept()
+            self.request_quit()
+            return
+        event.accept()

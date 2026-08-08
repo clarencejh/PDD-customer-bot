@@ -36,7 +36,8 @@ class SystemNotificationService:
     def refresh_visibility(self, enabled: bool | None = None) -> None:
         if enabled is None:
             enabled = config.get("system_notifications", True)
-        if enabled and QSystemTrayIcon.isSystemTrayAvailable():
+        # 托盘是后台运行和退出的入口，不应随通知开关隐藏。
+        if QSystemTrayIcon.isSystemTrayAvailable():
             self.tray_icon.show()
         else:
             self.tray_icon.hide()
@@ -79,7 +80,11 @@ class SystemNotificationService:
 
     def quit_application(self) -> None:
         if self.window is not None:
-            self.window.close()
+            request_quit = getattr(self.window, "request_quit", None)
+            if request_quit is not None:
+                request_quit()
+            else:
+                self.window.close()
             return
         app = QApplication.instance()
         if app is not None:

@@ -90,6 +90,23 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopico
 Filename: "{app}\{#AppExe}"; Description: "启动 {#AppName}"; Flags: nowait postinstall skipifsilent
 
 [Code]
+var
+  DeleteUserDataOnUninstall: Boolean;
+
+function InitializeUninstall(): Boolean;
+begin
+  DeleteUserDataOnUninstall :=
+    SuppressibleMsgBox(
+      '是否同时删除 Agent-Customer 的本地用户数据？' + #13#10 + #13#10 +
+      '删除内容包括：配置、账号登录态、知识库、聊天记录、日志和缓存。' + #13#10 +
+      '选择“否”将保留这些数据，方便以后重新安装继续使用。',
+      mbConfirmation,
+      MB_YESNO or MB_DEFBUTTON2,
+      IDNO
+    ) = IDYES;
+  Result := True;
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usUninstall then
@@ -98,6 +115,21 @@ begin
       'Software\Microsoft\Windows\CurrentVersion\Run',
       '{#AppName}'
     );
+  if (CurUninstallStep = usPostUninstall) and DeleteUserDataOnUninstall then
+  begin
+    if not DelTree(
+      ExpandConstant('{localappdata}\Agent-Customer'),
+      True,
+      True,
+      True
+    ) then
+      MsgBox(
+        '部分用户数据未能删除，请稍后手动清理：' + #13#10 +
+        ExpandConstant('{localappdata}\Agent-Customer'),
+        mbError,
+        MB_OK
+      );
+  end;
 end;
 
 // 不配置 [UninstallDelete]：数据库、日志、配置和浏览器登录态位于用户数据目录，

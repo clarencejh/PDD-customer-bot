@@ -68,6 +68,8 @@ def main():
     # 创建应用
     app = QApplication(sys.argv)
     app.setApplicationName("Agent-Customer")
+    # 关闭主窗口后仍由系统托盘承载应用生命周期。
+    app.setQuitOnLastWindowClosed(False)
 
     from service.system_notification_service import (
         SystemNotificationService,

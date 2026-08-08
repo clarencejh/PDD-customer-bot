@@ -375,6 +375,27 @@ class AutoReplyLLMGuardRegressionTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(manager.start_auto_reply(account))
         thread_class.assert_not_called()
 
+    def test_stop_requests_do_not_wait_on_gui_thread(self):
+        from ui.auto_reply.manager import AutoReplyManager
+
+        thread = mock.Mock()
+        thread.isRunning.return_value = True
+        manager = AutoReplyManager()
+        account = {
+            "channel_name": "pinduoduo",
+            "shop_id": "shop-1",
+            "user_id": "account-1",
+            "username": "seller",
+        }
+        manager.running_accounts[manager._account_key(account)] = thread
+
+        self.assertTrue(manager.stop_auto_reply(account))
+        thread.stop.assert_called_once_with()
+        thread.wait.assert_not_called()
+
+        manager.stop_all()
+        thread.wait.assert_not_called()
+
     async def test_llm_failure_notifies_operator_without_replying_to_customer(self):
         from Message.handlers.ai_handler import AIReplyHandler
         from service.llm_service import LLMServiceError
@@ -567,6 +588,124 @@ class StartupServiceRegressionTests(unittest.TestCase):
             service.set_enabled(True)
 
 
+class RuntimePathRegressionTests(unittest.TestCase):
+    def test_windows_user_data_path_uses_local_app_data(self):
+        from utils.runtime_path import get_user_data_path
+
+        path = get_user_data_path(
+            platform_name="Windows",
+            environ={"LOCALAPPDATA": r"C:\Users\seller\AppData\Local"},
+            home_dir=Path(r"C:\Users\seller"),
+        )
+
+        self.assertEqual(
+            path,
+            Path(r"C:\Users\seller\AppData\Local") / "Agent-Customer",
+        )
+
+    def test_macos_user_data_path_uses_application_support(self):
+        from utils.runtime_path import get_user_data_path
+
+        path = get_user_data_path(
+            platform_name="Darwin",
+            environ={},
+            home_dir=Path("/Users/seller"),
+        )
+
+        self.assertEqual(
+            path,
+            Path("/Users/seller/Library/Application Support/Agent-Customer"),
+        )
+
+
+class DataMaintenanceRegressionTests(unittest.TestCase):
+    def test_cache_cleanup_preserves_login_state_and_business_data(self):
+        from service.data_maintenance_service import DataMaintenanceService
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache = root / "user_data" / "account" / "Default" / "Cache"
+            login_state = root / "user_data" / "account" / "Default" / "Local Storage"
+            cache.mkdir(parents=True)
+            login_state.mkdir(parents=True)
+            (cache / "cached.bin").write_bytes(b"cache")
+            (login_state / "session.db").write_bytes(b"login")
+            (root / "config.json").write_text("{}", encoding="utf-8")
+            database = root / "temp" / "channel_shop.db"
+            database.parent.mkdir(parents=True)
+            database.write_bytes(b"database")
+            temporary = root / "temp" / "pending.tmp"
+            temporary.write_bytes(b"tmp")
+
+            service = DataMaintenanceService(
+                data_path=root,
+                log_clearer=lambda: (2, 100, []),
+            )
+            result = service.clear_cache_and_logs()
+
+            self.assertFalse(cache.exists())
+            self.assertFalse(temporary.exists())
+            self.assertTrue((login_state / "session.db").exists())
+            self.assertTrue((root / "config.json").exists())
+            self.assertTrue(database.exists())
+            self.assertEqual(result.removed_files, 3)
+            self.assertEqual(result.removed_directories, 1)
+
+    def test_conversation_cleanup_only_deletes_history_tables(self):
+        import sqlite3
+        from service.data_maintenance_service import DataMaintenanceService
+
+        with TemporaryDirectory() as directory:
+            database = Path(directory) / "channel_shop.db"
+            connection = sqlite3.connect(database)
+            connection.executescript(
+                "CREATE TABLE conversation_records (id INTEGER PRIMARY KEY);"
+                "CREATE TABLE agent_messages (id INTEGER PRIMARY KEY);"
+                "CREATE TABLE accounts (id INTEGER PRIMARY KEY);"
+                "INSERT INTO conversation_records VALUES (1);"
+                "INSERT INTO agent_messages VALUES (1);"
+                "INSERT INTO accounts VALUES (1);"
+            )
+            connection.commit()
+            connection.close()
+
+            service = DataMaintenanceService(
+                data_path=Path(directory),
+                history_database_paths=[database],
+                log_clearer=lambda: (0, 0, []),
+            )
+            result = service.clear_conversation_history()
+
+            connection = sqlite3.connect(database)
+            try:
+                self.assertEqual(
+                    connection.execute("SELECT COUNT(*) FROM conversation_records").fetchone()[0],
+                    0,
+                )
+                self.assertEqual(
+                    connection.execute("SELECT COUNT(*) FROM agent_messages").fetchone()[0],
+                    0,
+                )
+                self.assertEqual(
+                    connection.execute("SELECT COUNT(*) FROM accounts").fetchone()[0],
+                    1,
+                )
+            finally:
+                connection.close()
+            self.assertEqual(result.removed_rows, 2)
+            self.assertEqual(result.databases, 1)
+
+    def test_windows_uninstaller_preserves_user_data_by_default(self):
+        script = (
+            Path(__file__).resolve().parents[1] / "scripts" / "installer.iss"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("MB_DEFBUTTON2", script)
+        self.assertIn("IDNO", script)
+        self.assertIn("{localappdata}\\Agent-Customer", script)
+        self.assertIn("DeleteUserDataOnUninstall", script)
+
+
 class SystemNotificationRegressionTests(unittest.TestCase):
     def test_notification_helper_dispatches_to_application_service(self):
         from service.system_notification_service import notify_system
@@ -581,6 +720,98 @@ class SystemNotificationRegressionTests(unittest.TestCase):
 
         self.assertTrue(result)
         notifier.notify.assert_called_once_with("连接失败", "账号已离线", "warning")
+
+    def test_tray_quit_uses_window_shutdown_flow(self):
+        from service.system_notification_service import SystemNotificationService
+
+        service = object.__new__(SystemNotificationService)
+        service.window = mock.Mock()
+
+        service.quit_application()
+
+        service.window.request_quit.assert_called_once_with()
+        service.window.close.assert_not_called()
+
+    def test_close_window_hides_to_available_tray(self):
+        from ui.main_ui import MainWindow
+
+        window = mock.Mock()
+        window._force_quit = False
+        window._background_notice_shown = False
+        event = mock.Mock()
+        with mock.patch(
+            "PyQt6.QtWidgets.QSystemTrayIcon.isSystemTrayAvailable",
+            return_value=True,
+        ), mock.patch(
+            "service.system_notification_service.notify_system"
+        ) as notify:
+            MainWindow.closeEvent(window, event)
+
+        event.ignore.assert_called_once_with()
+        event.accept.assert_not_called()
+        window.hide.assert_called_once_with()
+        notify.assert_called_once()
+
+
+class KnowledgeImportRegressionTests(unittest.TestCase):
+    def test_csv_template_has_bom_and_expected_headers(self):
+        from ui.Knowledge_ui import KnowledgeUI
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "template.csv"
+            KnowledgeUI._write_csv_template(str(path))
+
+            self.assertTrue(path.read_bytes().startswith(b"\xef\xbb\xbf"))
+            self.assertEqual(
+                path.read_text(encoding="utf-8-sig").strip(),
+                "一级分类,二级分类,话术标题,话术内容",
+            )
+
+    def test_csv_import_uses_same_four_column_mapping_as_excel(self):
+        from ui.Knowledge_ui import KnowledgeUI
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "knowledge.csv"
+            path.write_text(
+                "一级分类,二级分类,话术标题,话术内容\n"
+                "售后,退换货,退货时效,签收后七天内可申请退货\n"
+                ",物流,无效行,缺少一级分类\n",
+                encoding="utf-8-sig",
+            )
+
+            rows, skipped = KnowledgeUI._parse_import_file(str(path))
+
+        self.assertEqual(skipped, 1)
+        self.assertEqual(rows, [{
+            "title": "退货时效",
+            "content": "签收后七天内可申请退货",
+            "tags": "售后,退换货",
+        }])
+
+    def test_import_rejects_unlisted_file_format(self):
+        from ui.Knowledge_ui import KnowledgeUI
+
+        with self.assertRaisesRegex(ValueError, "不支持的文件格式"):
+            KnowledgeUI._parse_import_file("knowledge.json")
+
+    def test_xlsx_import_remains_supported(self):
+        import pandas as pd
+        from ui.Knowledge_ui import KnowledgeUI
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "knowledge.xlsx"
+            pd.DataFrame([
+                ["物流", "发货", "发货时间", "订单将在四十八小时内发出"],
+            ], columns=KnowledgeUI.IMPORT_TEMPLATE_HEADERS).to_excel(
+                path,
+                index=False,
+            )
+
+            rows, skipped = KnowledgeUI._parse_import_file(str(path))
+
+        self.assertEqual(skipped, 0)
+        self.assertEqual(rows[0]["title"], "发货时间")
+        self.assertEqual(rows[0]["tags"], "物流,发货")
 
 
 class ToolScopeRegressionTests(unittest.TestCase):

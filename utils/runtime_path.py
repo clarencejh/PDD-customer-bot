@@ -4,6 +4,7 @@
 """
 
 import os
+import platform
 import sys
 import copy
 import shutil
@@ -40,10 +41,27 @@ def get_data_path() -> Path:
     """Return the writable per-user data directory."""
     if not is_frozen():
         return get_base_path()
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    if local_app_data:
-        return Path(local_app_data) / "Agent-Customer"
-    return get_base_path()
+    return get_user_data_path()
+
+
+def get_user_data_path(
+    platform_name: str | None = None,
+    environ: dict[str, str] | None = None,
+    home_dir: Path | None = None,
+) -> Path:
+    """Return the conventional per-user application data directory."""
+    platform_name = platform_name or platform.system()
+    environ = os.environ if environ is None else environ
+    home_dir = Path.home() if home_dir is None else Path(home_dir)
+    if platform_name == "Windows":
+        root = environ.get("LOCALAPPDATA")
+        return (
+            Path(root) if root else home_dir / "AppData" / "Local"
+        ) / "Agent-Customer"
+    if platform_name == "Darwin":
+        return home_dir / "Library" / "Application Support" / "Agent-Customer"
+    root = environ.get("XDG_DATA_HOME")
+    return (Path(root) if root else home_dir / ".local" / "share") / "Agent-Customer"
 
 
 def resolve_data_path(path: Union[str, Path]) -> Path:
@@ -153,7 +171,7 @@ def get_config_path(config_name: str = "config.json") -> Path:
     Returns:
         Path: 配置文件的绝对路径
     """
-    # 配置属于用户数据，打包后放到 LOCALAPPDATA，避免安装目录不可写。
+    # 配置属于用户数据，打包后放到系统标准用户数据目录，避免安装目录不可写。
     target = get_data_path() / config_name
     if is_frozen() and not target.exists():
         legacy = get_base_path() / config_name
