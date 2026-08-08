@@ -165,7 +165,7 @@ python scripts/install_playwright.py
 **修改方法：**
 发布新版本时只修改：
 ```python
-__version__ = "1.4.0"
+__version__ = "1.4.0b1"
 ```
 
 ---

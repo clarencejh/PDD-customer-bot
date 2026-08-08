@@ -756,12 +756,20 @@ class SystemNotificationRegressionTests(unittest.TestCase):
 class VersionSystemRegressionTests(unittest.TestCase):
     def test_project_uses_single_version_source(self):
         import tomllib
-        from core.app_version import APP_VERSION, DISPLAY_VERSION, __version__
+        from core.app_version import (
+            APP_VERSION,
+            DISPLAY_VERSION,
+            IS_PRERELEASE,
+            RELEASE_TAG,
+            __version__,
+        )
         from scripts.build_win_exe import get_version
 
-        self.assertEqual(__version__, "1.4.0")
+        self.assertEqual(__version__, "1.4.0b1")
         self.assertEqual(APP_VERSION, __version__)
-        self.assertEqual(DISPLAY_VERSION, "v1.4.0")
+        self.assertEqual(DISPLAY_VERSION, "v1.4.0 Beta 1")
+        self.assertEqual(RELEASE_TAG, "v1.4.0-beta.1")
+        self.assertTrue(IS_PRERELEASE)
         self.assertEqual(get_version(), APP_VERSION)
 
         project_file = Path(__file__).resolve().parents[1] / "pyproject.toml"
@@ -771,6 +779,18 @@ class VersionSystemRegressionTests(unittest.TestCase):
         self.assertEqual(
             project["tool"]["hatch"]["version"]["path"],
             "core/app_version.py",
+        )
+
+    def test_version_details_support_stable_and_release_candidates(self):
+        from core.app_version import _version_details
+
+        self.assertEqual(
+            _version_details("1.4.0"),
+            ("v1.4.0", "v1.4.0", False),
+        )
+        self.assertEqual(
+            _version_details("1.4.0rc2"),
+            ("v1.4.0 RC 2", "v1.4.0-rc.2", True),
         )
 
 

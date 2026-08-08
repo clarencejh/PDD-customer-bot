@@ -11,7 +11,7 @@
 ;
 ; 编译命令（ISCC.exe 路径按实际安装位置调整）：
 ;   ISCC.exe scripts\installer.iss                   （仅用于调试）
-;   ISCC.exe /DAppVersion=1.4.0 scripts\installer.iss （指定版本号）
+;   ISCC.exe /DAppVersion=x.y.z scripts\installer.iss （指定调试版本号）
 ; 实际构建由 scripts\build_win_exe.py 调用，从 core/app_version.py 读取版本号。
 ; 产物：dist\installer\Agent-Customer-Setup-<version>.exe
 ; ============================================================

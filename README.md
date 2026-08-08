@@ -97,11 +97,12 @@ python scripts/build_win_exe.py --clean
 推送 `v*` 格式的 tag 会触发 GitHub Actions 自动构建并发布 Release：
 
 ```bash
-git tag v1.4.0
-git push origin v1.4.0
+git tag v1.4.0-beta.1
+git push origin v1.4.0-beta.1
 ```
 
-构建产物（`Agent-Customer-Setup-<版本号>.exe`）会自动上传到该 tag 对应的 Release 页，即上文「下载安装」的来源。
+标签必须与 `core/app_version.py` 派生的发布标签一致。Alpha、Beta 和 RC
+版本会自动标记为 GitHub Pre-release；构建产物会上传到对应的 Release 页。
 
 ## 项目结构
 
