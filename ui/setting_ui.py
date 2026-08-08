@@ -14,7 +14,7 @@ from qfluentwidgets import (CardWidget, SubtitleLabel, CaptionLabel, BodyLabel,
                            PrimaryPushButton, PushButton, StrongBodyLabel,
                            LineEdit, ComboBox, ScrollArea, FluentIcon as FIF,
                            InfoBar, InfoBarPosition, TextEdit, PasswordLineEdit,
-                           TimePicker, ListWidget, EditableComboBox)
+                           TimePicker, ListWidget, EditableComboBox, SwitchButton)
 from PyQt6.QtCore import QTime
 from utils.logger_loguru import get_logger
 from config import LLMConfig, LLMProviderConfig, config, config_base
@@ -561,6 +561,10 @@ class BusinessHoursCard(CardWidget):
         self.end_time_picker.setTime(QTime(23, 0))  # 默认23:00
         form_layout.addRow("结束时间:", self.end_time_picker)
 
+        self.auto_start_reply_switch = SwitchButton()
+        self.auto_start_reply_switch.setChecked(True)
+        form_layout.addRow("启动时自动开启回复:", self.auto_start_reply_switch)
+
         layout.addLayout(form_layout)
 
         # 说明文本
@@ -581,7 +585,8 @@ class BusinessHoursCard(CardWidget):
             "business_hours": {
                 "start": self.start_time_picker.getTime().toString("HH:mm"),
                 "end": self.end_time_picker.getTime().toString("HH:mm")
-            }
+            },
+            "auto_start_reply": self.auto_start_reply_switch.isChecked(),
         }
 
     def setConfig(self, config: dict):
@@ -600,6 +605,7 @@ class BusinessHoursCard(CardWidget):
         end_time = QTime.fromString(end_time_str, "HH:mm")
         if end_time.isValid():
             self.end_time_picker.setTime(end_time)
+        self.auto_start_reply_switch.setChecked(config.get("auto_start_reply", True))
 
 
 class SettingUI(QFrame):
@@ -756,7 +762,8 @@ class SettingUI(QFrame):
                 "business_hours": {
                     "start": config.get("business_hours.start", "08:00"),
                     "end": config.get("business_hours.end", "23:00")
-                }
+                },
+                "auto_start_reply": config.get("auto_start_reply", True),
             }
 
             # 验证并设置配置
@@ -795,7 +802,8 @@ class SettingUI(QFrame):
             "prompt": config_data.get("prompt", {
                 "instructions": []
             }),
-            "business_hours": config_data.get("business_hours", {"start": "08:00", "end": "23:00"})
+            "business_hours": config_data.get("business_hours", {"start": "08:00", "end": "23:00"}),
+            "auto_start_reply": config_data.get("auto_start_reply", True),
         }
 
         # 验证business_hours格式
@@ -825,7 +833,10 @@ class SettingUI(QFrame):
 
         # 处理业务时间配置
         business_hours_config = validated_config["business_hours"]
-        self.business_hours_card.setConfig({"business_hours": business_hours_config})
+        self.business_hours_card.setConfig({
+            "business_hours": business_hours_config,
+            "auto_start_reply": validated_config["auto_start_reply"],
+        })
 
     def onSaveConfig(self):
         """保存配置到config模块"""
@@ -842,6 +853,7 @@ class SettingUI(QFrame):
                 "active_llm_provider": active_provider_id,
                 "prompt": prompt_config,
                 "business_hours": business_config.get("businessHours", {"start": "08:00", "end": "23:00"}),
+                "auto_start_reply": business_config.get("auto_start_reply", True),
                 # 保持与旧配置的兼容性
                 "db_path": config.get("db_path") or "./temp/channel_shop.db"
             }
@@ -1076,4 +1088,3 @@ class SettingUI(QFrame):
             except Exception as e:
                 self.logger.error(f"重置配置失败: error_type={type(e).__name__}")
                 QMessageBox.critical(self, "重置失败", f"重置配置失败：{str(e)}")
-

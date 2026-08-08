@@ -32,6 +32,7 @@ from qfluentwidgets import (
     TableWidget,
 )
 
+from config import config
 from service.account_service import account_service
 from service.llm_service import validate_llm_config
 from utils.logger_loguru import get_logger
@@ -50,9 +51,11 @@ class OperationsUI(QFrame):
         self.accounts_data: list[dict[str, Any]] = []
         self._loaded_once = False
         self._identity_refresh_attempted = False
+        self._startup_auto_reply_attempted = False
         self.identity_thread = None
         self._selected_keys: set[str] = set()
         self._pending_start_accounts: list[dict[str, Any]] = []
+        self._pending_start_interactive = True
         self.llm_preflight_thread = None
         self._reported_ai_failures: set[str] = set()
         self._build_ui()
@@ -206,6 +209,7 @@ class OperationsUI(QFrame):
             self._populate_shop_filter()
             self.refresh_table()
             self._refresh_unknown_identities()
+            self._maybe_auto_start_reply()
         except Exception as exc:
             self.logger.error(f"加载店铺运营数据失败: error_type={type(exc).__name__}")
             self.summary_label.setText("加载失败，请刷新重试")
@@ -216,6 +220,31 @@ class OperationsUI(QFrame):
 
     def reloadAccounts(self):
         self.load_accounts()
+
+    @staticmethod
+    def startup_auto_reply_candidates(accounts, is_running):
+        """返回本次启动时可自动开启回复的在线账号。"""
+        return [
+            account for account in accounts
+            if account.get("status") == 1 and not is_running(account)
+        ]
+
+    def _maybe_auto_start_reply(self):
+        if self._startup_auto_reply_attempted:
+            return
+        self._startup_auto_reply_attempted = True
+        if not config.get("auto_start_reply", True):
+            self.logger.info("已关闭启动时自动开启回复")
+            return
+        accounts = self.startup_auto_reply_candidates(
+            self.accounts_data,
+            auto_reply_manager.is_running,
+        )
+        if not accounts:
+            self.logger.info("启动时没有可自动开启回复的在线账号")
+            return
+        self.logger.info(f"启动时将自动开启 {len(accounts)} 个账号的自动回复")
+        self._run_llm_preflight(accounts, interactive=False)
 
     def updateStats(self):
         self.summary_label.setText(self._summary_text())
@@ -477,18 +506,23 @@ class OperationsUI(QFrame):
         else:
             self._run_llm_preflight([account])
 
-    def _run_llm_preflight(self, accounts):
+    def _run_llm_preflight(self, accounts, interactive=True):
         if self.llm_preflight_thread and self.llm_preflight_thread.isRunning():
-            QMessageBox.information(self, "正在检查", "正在验证 AI 配置，请稍候。")
+            if interactive:
+                QMessageBox.information(self, "正在检查", "正在验证 AI 配置，请稍候。")
             return
         try:
-            config = validate_llm_config()
+            llm_config = validate_llm_config()
         except Exception as exc:
-            QMessageBox.warning(self, "AI 配置未完成", str(exc))
+            if interactive:
+                QMessageBox.warning(self, "AI 配置未完成", str(exc))
+            else:
+                self.logger.warning(f"启动时自动开启回复已跳过: {exc}")
             return
         self._pending_start_accounts = list(accounts)
+        self._pending_start_interactive = interactive
         self.start_all_btn.setEnabled(False)
-        self.llm_preflight_thread = LLMPreflightThread(config, self)
+        self.llm_preflight_thread = LLMPreflightThread(llm_config, self)
         self.llm_preflight_thread.test_finished.connect(self._on_preflight_finished)
         self.llm_preflight_thread.finished.connect(self._clear_preflight)
         self.llm_preflight_thread.finished.connect(self.llm_preflight_thread.deleteLater)
@@ -501,26 +535,42 @@ class OperationsUI(QFrame):
     def _on_preflight_finished(self, success: bool, message: str):
         accounts = self._pending_start_accounts
         self._pending_start_accounts = []
+        interactive = getattr(self, "_pending_start_interactive", True)
         if not success:
-            QMessageBox.warning(self, "AI 服务不可用", f"无法开启自动回复：{message}")
+            if interactive:
+                QMessageBox.warning(self, "AI 服务不可用", f"无法开启自动回复：{message}")
+            else:
+                self.logger.warning(f"启动时自动开启回复失败: {message}")
             return
         started = 0
         for account in accounts:
+            connection_failed = (
+                (lambda error, data=account: self._on_reply_failed(data, error))
+                if interactive
+                else (lambda error, data=account: self._on_startup_reply_failed(data, error))
+            )
             if auto_reply_manager.start_auto_reply(
                 account,
                 on_connection_success=lambda: self.refresh_runtime_state(),
-                on_connection_failed=lambda error, data=account: self._on_reply_failed(data, error),
+                on_connection_failed=connection_failed,
                 on_ai_service_failed=lambda error, data=account: self._on_ai_failed(data, error),
             ):
                 started += 1
         self.refresh_runtime_state()
-        if len(accounts) > 1:
+        if interactive and len(accounts) > 1:
             QMessageBox.information(self, "操作已提交", f"已发起 {started} / {len(accounts)} 个账号的连接。")
 
     def _on_reply_failed(self, account, error):
         account["last_error"] = error
         self.refresh_runtime_state()
         QMessageBox.warning(self, "自动回复连接失败", f"账号 {account.get('username', '')}：{error}")
+
+    def _on_startup_reply_failed(self, account, error):
+        account["last_error"] = error
+        self.refresh_runtime_state()
+        self.logger.warning(
+            f"启动时自动开启回复连接失败: account={self.account_key(account)}, error={error}"
+        )
 
     def _on_ai_failed(self, account, error):
         key = self.account_key(account)

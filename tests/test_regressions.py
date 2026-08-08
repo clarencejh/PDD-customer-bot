@@ -408,6 +408,9 @@ class AutoReplyLLMGuardRegressionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class OperationsUIStateRegressionTests(unittest.TestCase):
+    def test_auto_reply_starts_by_default(self):
+        self.assertTrue(ConfigModel().auto_start_reply)
+
     def test_platform_status_is_distinct_from_auto_reply_status(self):
         from ui.auto_reply.ui import OperationsUI
 
@@ -428,6 +431,39 @@ class OperationsUIStateRegressionTests(unittest.TestCase):
         self.assertNotEqual(
             OperationsUI.account_key(first), OperationsUI.account_key(second)
         )
+
+    def test_startup_auto_reply_only_selects_online_stopped_accounts(self):
+        from ui.auto_reply.ui import OperationsUI
+
+        accounts = [
+            {"user_id": "online", "status": 1},
+            {"user_id": "running", "status": 1},
+            {"user_id": "offline", "status": 3},
+            {"user_id": "unverified", "status": None},
+        ]
+        candidates = OperationsUI.startup_auto_reply_candidates(
+            accounts,
+            lambda account: account["user_id"] == "running",
+        )
+
+        self.assertEqual([account["user_id"] for account in candidates], ["online"])
+
+    def test_startup_auto_reply_is_only_attempted_once(self):
+        from ui.auto_reply.ui import OperationsUI
+
+        start = mock.Mock()
+        ui = SimpleNamespace(
+            _startup_auto_reply_attempted=False,
+            accounts_data=[{"user_id": "online", "status": 1}],
+            logger=mock.Mock(),
+            startup_auto_reply_candidates=lambda accounts, is_running: accounts,
+            _run_llm_preflight=start,
+        )
+        with mock.patch("ui.auto_reply.ui.config.get", return_value=True):
+            OperationsUI._maybe_auto_start_reply(ui)
+            OperationsUI._maybe_auto_start_reply(ui)
+
+        start.assert_called_once_with(ui.accounts_data, interactive=False)
 
 
 class ToolScopeRegressionTests(unittest.TestCase):

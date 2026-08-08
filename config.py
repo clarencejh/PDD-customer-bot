@@ -118,6 +118,10 @@ class ConfigModel(BaseModel):
         default_factory=PromptConfig,
         description="提示词配置"
     )
+    auto_start_reply: bool = Field(
+        default=True,
+        description="软件启动后自动开启在线账号的自动回复",
+    )
     db_path: str = Field(default="./temp/channel_shop.db", description="数据库路径")
 
     @model_validator(mode="after")
@@ -144,6 +148,7 @@ config_base = {
         "api_base": ""
     },
     "active_llm_provider": "default",
+    "auto_start_reply": True,
     "llm_providers": [
         {
             "id": "default",
@@ -594,4 +599,3 @@ def get_active_llm_config() -> Dict[str, str]:
     """Return the currently selected LLM provider configuration."""
     with config._lock:
         return resolve_active_llm_config(config._config or config_base)
-
