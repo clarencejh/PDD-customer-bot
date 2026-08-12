@@ -14,6 +14,14 @@ def _public_address(hostname: str, port: int) -> str:
     addresses = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
     if not addresses:
         raise ValueError("logo host has no address")
+    # A local proxy in fake-ip mode (Clash/mihomo TUN) answers every query with
+    # the RFC 2544 benchmark range and routes by hostname itself.  That range is
+    # unroutable otherwise, so allowing it here cannot reach real LAN targets.
+    if all(
+        ipaddress.ip_address(item[4][0]) in ipaddress.ip_network("198.18.0.0/15")
+        for item in addresses
+    ):
+        return addresses[0][4][0]
     for address in addresses:
         ip = ipaddress.ip_address(address[4][0])
         if (
