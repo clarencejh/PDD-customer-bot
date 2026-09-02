@@ -1429,5 +1429,107 @@ class CompatibilityRegressionTests(unittest.TestCase):
                 safe_image_fetch.fetch_image("https://example.com/logo.png")
 
 
+    def test_logo_fetch_accepts_fake_ip_proxy_range(self):
+        import utils.safe_image_fetch as safe_image_fetch
+
+        # Clash/mihomo fake-ip TUN 会把所有域名解析到 198.18.0.0/15 基准段，
+        # 公网校验必须放行该段，否则代理环境下 logo 永远加载失败。
+        with mock.patch.object(
+            safe_image_fetch.socket,
+            "getaddrinfo",
+            return_value=[(2, 1, 6, "", ("198.18.0.1", 443))],
+        ):
+            result = safe_image_fetch._public_address("example.com", 443)
+        self.assertEqual(result, "198.18.0.1")
+
+
+class LifecycleStopRaceRegressionTests(unittest.IsolatedAsyncioTestCase):
+    """stop_account 在任务循环自行清理条目时不应抛出 KeyError。"""
+
+    def _minimal_channel(self):
+        from Channel.pinduoduo.core.pdd_lifecycle import LifecycleMixin
+
+        class _MinimalChannel(LifecycleMixin):
+            def __init__(self):
+                from utils.logger_loguru import get_logger
+
+                self.logger = get_logger("LifecycleStopTest")
+                self.channel_name = "pinduoduo"
+                self._stop_event = asyncio.Event()
+                self.ws = None
+                self._account_key = None
+                self._account_agent = None
+                self._reconnect_tasks = {}
+                self._heartbeat_tasks = {}
+                self._health_tasks = {}
+                self.processing_tasks = set()
+                self.status_manager = SimpleNamespace(
+                    update_status=lambda *args, **kwargs: None,
+                )
+                self.resource_manager = SimpleNamespace(
+                    cleanup_all=mock.AsyncMock(),
+                )
+                self.consumer_manager = SimpleNamespace(
+                    stop_consumer=mock.AsyncMock(),
+                )
+                self.queue_manager = SimpleNamespace(
+                    remove_queue=mock.Mock(),
+                )
+
+        return _MinimalChannel()
+
+    def _patch_account(self):
+        return mock.patch(
+            "Channel.pinduoduo.core.pdd_lifecycle.db_manager",
+        )
+
+    async def test_stop_survives_loop_removing_its_own_task_entry(self):
+        channel = self._minimal_channel()
+        connection_key = "shop-1_user-1"
+
+        async def heartbeat_like():
+            # 模拟心跳循环：被取消后在该协程内部的 finally 中清理自身条目。
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                pass
+            finally:
+                channel._heartbeat_tasks.pop(connection_key, None)
+                channel._health_tasks.pop(connection_key, None)
+
+        task = asyncio.create_task(heartbeat_like())
+        channel._heartbeat_tasks[connection_key] = task
+        channel._health_tasks[connection_key] = task
+        channel._reconnect_tasks[connection_key] = task
+
+        with self._patch_account() as db_manager:
+            db_manager.get_account.return_value = {
+                "username": "seller",
+                "status": "active",
+                "cookies": "",
+                "password": "",
+            }
+            # 修复前：stop_account 在 await 让出后再次 del 相同键 → KeyError。
+            await channel.stop_account("shop-1", "user-1")
+
+        self.assertNotIn(connection_key, channel._heartbeat_tasks)
+        self.assertNotIn(connection_key, channel._health_tasks)
+        self.assertNotIn(connection_key, channel._reconnect_tasks)
+
+    async def test_stop_ignores_already_cleared_entries(self):
+        channel = self._minimal_channel()
+
+        # 条目在 stop 之前已被其它协程清空，stop_account 不应报错。
+        with self._patch_account() as db_manager:
+            db_manager.get_account.return_value = {
+                "username": "seller",
+                "status": "active",
+                "cookies": "",
+                "password": "",
+            }
+            await channel.stop_account("shop-1", "user-1")
+        self.assertTrue(channel._stop_event.is_set())
+
+
 if __name__ == "__main__":
     unittest.main()

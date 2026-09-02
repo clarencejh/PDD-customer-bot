@@ -40,7 +40,7 @@ class LifecycleMixin:
 
         if connection_key in self._reconnect_tasks:
             self._reconnect_tasks[connection_key].cancel()
-            del self._reconnect_tasks[connection_key]
+            self._reconnect_tasks.pop(connection_key, None)
 
         if self.reconnect_config.enable_auto_reconnect:
             connect_task = asyncio.create_task(
@@ -83,7 +83,7 @@ class LifecycleMixin:
                         self.logger.error(
                             f"等待重连任务完成时出错: error_type={type(task_error).__name__}"
                         )
-                del self._reconnect_tasks[connection_key]
+                self._reconnect_tasks.pop(connection_key, None)
                 self.logger.debug(f"已清理重连任务: {connection_key}")
 
             if connection_key in self._heartbeat_tasks:
@@ -100,7 +100,7 @@ class LifecycleMixin:
                         self.logger.error(
                             f"等待心跳任务完成时出错: error_type={type(task_error).__name__}"
                         )
-                del self._heartbeat_tasks[connection_key]
+                self._heartbeat_tasks.pop(connection_key, None)
                 self.logger.debug(f"已清理心跳任务: {connection_key}")
 
             if connection_key in self._health_tasks:
@@ -117,7 +117,7 @@ class LifecycleMixin:
                         self.logger.error(
                             f"等待Cookie健康检查任务完成时出错: error_type={type(task_error).__name__}"
                         )
-                del self._health_tasks[connection_key]
+                self._health_tasks.pop(connection_key, None)
                 self.logger.debug(f"已清理Cookie健康检查任务: {connection_key}")
 
             self.status_manager.update_status(shop_id, user_id, username, ConnectionState.DISCONNECTED)
@@ -138,7 +138,7 @@ class LifecycleMixin:
         except Exception as e:
             self.logger.error(
                 f"停止店铺 {shop_id} 账号 {user_id} 时发生错误: "
-                f"error_type={type(e).__name__}"
+                f"error_type={type(e).__name__}, detail={e}"
             )
 
     async def init(self, shop_id: str, user_id: str, username: str, on_success: callable, on_failure: callable):
@@ -320,7 +320,7 @@ class LifecycleMixin:
                             f"停止任务时出错: {connection_key}, "
                             f"error_type={type(e).__name__}"
                         )
-                del self._reconnect_tasks[connection_key]
+                self._reconnect_tasks.pop(connection_key, None)
 
             for connection_key, task in list(self._heartbeat_tasks.items()):
                 if not task.done():
@@ -334,7 +334,7 @@ class LifecycleMixin:
                             f"停止心跳任务时出错: {connection_key}, "
                             f"error_type={type(e).__name__}"
                         )
-                del self._heartbeat_tasks[connection_key]
+                self._heartbeat_tasks.pop(connection_key, None)
 
             for connection_key, task in list(self._health_tasks.items()):
                 if not task.done():
@@ -348,7 +348,7 @@ class LifecycleMixin:
                             f"停止Cookie健康检查任务时出错: {connection_key}, "
                             f"error_type={type(e).__name__}"
                         )
-                del self._health_tasks[connection_key]
+                self._health_tasks.pop(connection_key, None)
 
             if self.ws:
                 await self._safe_close_websocket(self.ws)
@@ -415,7 +415,7 @@ class LifecycleMixin:
             )
         finally:
             if connection_key in self._heartbeat_tasks:
-                del self._heartbeat_tasks[connection_key]
+                self._heartbeat_tasks.pop(connection_key, None)
             self.logger.debug(f"心跳循环已结束: {shop_id}-{username}")
 
     async def _cookie_health_loop(self, shop_id: str, user_id: str, username: str):
@@ -489,7 +489,7 @@ class LifecycleMixin:
             )
         finally:
             if connection_key in self._health_tasks:
-                del self._health_tasks[connection_key]
+                self._health_tasks.pop(connection_key, None)
             self.logger.debug(f"Cookie 健康检查循环已结束: {shop_id}-{username}")
 
     async def _message_loop(self, websocket, shop_id: str, user_id: str, username: str, queue_name: str):
