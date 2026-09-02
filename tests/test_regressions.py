@@ -769,10 +769,10 @@ class VersionSystemRegressionTests(unittest.TestCase):
         )
         from scripts.build_win_exe import get_version
 
-        self.assertEqual(__version__, "1.4.0b1")
+        self.assertEqual(__version__, "1.4.0b2")
         self.assertEqual(APP_VERSION, __version__)
-        self.assertEqual(DISPLAY_VERSION, "v1.4.0 Beta 1")
-        self.assertEqual(RELEASE_TAG, "v1.4.0-beta.1")
+        self.assertEqual(DISPLAY_VERSION, "v1.4.0 Beta 2")
+        self.assertEqual(RELEASE_TAG, "v1.4.0-beta.2")
         self.assertTrue(IS_PRERELEASE)
         self.assertEqual(get_version(), APP_VERSION)
 
