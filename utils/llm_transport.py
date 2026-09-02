@@ -187,11 +187,37 @@ def _is_metadata_host(host: str) -> bool:
 
 
 def _is_fake_ip(address: str) -> bool:
-    """True for the RFC 2544 benchmark range used by fake-ip proxy DNS."""
+    """True for an IPv4 or macOS synthesized IPv6 fake-ip address.
+
+    Some macOS resolver paths return an RFC 2544 fake IPv4 result twice: once
+    as ``198.18.x.x`` and once as the synthesized IPv6 form
+    ``::ffff:0:<embedded-v4>``.  The latter is still routed by the hostname
+    through the proxy and must not be treated as a real private destination.
+    """
     try:
-        return ipaddress.ip_address(address) in ipaddress.ip_network("198.18.0.0/15")
+        value = ipaddress.ip_address(address)
     except ValueError:
         return False
+
+    fake_network = ipaddress.ip_network("198.18.0.0/15")
+    if isinstance(value, ipaddress.IPv4Address):
+        return value in fake_network
+
+    mapped = value.ipv4_mapped
+    if mapped is not None:
+        return mapped in fake_network
+
+    # macOS may encode the fake IPv4 address as ::ffff:0:<hex IPv4> rather
+    # than the canonical IPv4-mapped IPv6 representation.
+    packed = value.packed
+    if (
+        packed[:8] == b"\x00" * 8
+        and packed[8:10] == b"\xff\xff"
+        and packed[10:12] == b"\x00\x00"
+    ):
+        embedded = ipaddress.IPv4Address(packed[-4:])
+        return embedded in fake_network
+    return False
 
 
 def validate_transport_endpoint(profile: LLMProfile) -> str:

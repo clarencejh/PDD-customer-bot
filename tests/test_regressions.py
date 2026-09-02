@@ -184,7 +184,6 @@ class LoginServiceRegressionTests(unittest.IsolatedAsyncioTestCase):
             "password",
             headless=False,
             profile_scope="pinduoduo:shop-1:user-1",
-            login_mode="password",
         )
 
     async def test_partial_account_scope_is_rejected(self):
@@ -193,24 +192,9 @@ class LoginServiceRegressionTests(unittest.IsolatedAsyncioTestCase):
                 "name", "password", shop_id="shop-1"
             )
 
-    async def test_qr_login_does_not_require_credentials(self):
-        with mock.patch(
-            "Channel.pinduoduo.pdd_login.login_pdd",
-            new=mock.AsyncMock(return_value={"username": "scanned-user"}),
-        ) as login_pdd, mock.patch(
-            "service.account_service.uuid.uuid4"
-        ) as uuid4:
-            uuid4.return_value.hex = "session-id"
-            result = await AccountService().login("", "", login_mode="qr")
-
-        self.assertEqual(result["username"], "scanned-user")
-        login_pdd.assert_awaited_once_with(
-            "qr-session-id",
-            "",
-            headless=False,
-            profile_scope=None,
-            login_mode="qr",
-        )
+    async def test_login_requires_username_and_password(self):
+        with self.assertRaisesRegex(ValueError, "账号密码登录需要用户名和密码"):
+            await AccountService().login("", "")
 
 
 class ConfigRegressionTests(unittest.TestCase):
@@ -375,7 +359,7 @@ class AutoReplyLLMGuardRegressionTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaisesRegex(ValueError, expected):
                     validate_llm_config(config_data)
 
-    def test_manager_does_not_create_thread_without_llm_config(self):
+    def test_manager_starts_connection_without_llm_preflight(self):
         from ui.auto_reply.manager import AutoReplyManager
 
         manager = AutoReplyManager()
@@ -386,11 +370,11 @@ class AutoReplyLLMGuardRegressionTests(unittest.IsolatedAsyncioTestCase):
             "username": "seller",
         }
         with mock.patch(
-            "ui.auto_reply.manager.validate_llm_config",
-            side_effect=ValueError("未配置"),
-        ), mock.patch("ui.auto_reply.manager.AutoReplyThread") as thread_class:
-            self.assertFalse(manager.start_auto_reply(account))
-        thread_class.assert_not_called()
+            "ui.auto_reply.manager.AutoReplyThread"
+        ) as thread_class:
+            self.assertTrue(manager.start_auto_reply(account))
+        thread_class.assert_called_once_with(account)
+        thread_class.return_value.start.assert_called_once_with()
 
     def test_stop_requests_do_not_wait_on_gui_thread(self):
         from ui.auto_reply.manager import AutoReplyManager
@@ -446,9 +430,6 @@ class AutoReplyLLMGuardRegressionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class OperationsUIStateRegressionTests(unittest.TestCase):
-    def test_auto_reply_starts_by_default(self):
-        self.assertTrue(ConfigModel().auto_start_reply)
-
     def test_system_behavior_defaults_are_safe(self):
         model = ConfigModel()
         self.assertFalse(model.launch_at_login)
@@ -475,38 +456,44 @@ class OperationsUIStateRegressionTests(unittest.TestCase):
             OperationsUI.account_key(first), OperationsUI.account_key(second)
         )
 
-    def test_startup_auto_reply_only_selects_online_stopped_accounts(self):
+    def test_startup_candidates_include_online_accounts_only(self):
         from ui.auto_reply.ui import OperationsUI
 
         accounts = [
             {"user_id": "online", "status": 1},
-            {"user_id": "running", "status": 1},
             {"user_id": "offline", "status": 3},
-            {"user_id": "unverified", "status": None},
         ]
         candidates = OperationsUI.startup_auto_reply_candidates(
             accounts,
-            lambda account: account["user_id"] == "running",
+            lambda account: account["user_id"] == "online",
         )
+        self.assertEqual(candidates, [])
 
-        self.assertEqual([account["user_id"] for account in candidates], ["online"])
+        candidates = OperationsUI.startup_auto_reply_candidates(
+            accounts,
+            lambda account: False,
+        )
+        self.assertEqual(candidates, [accounts[0]])
 
-    def test_startup_auto_reply_is_only_attempted_once(self):
+    def test_account_display_masks_sensitive_values_by_default(self):
         from ui.auto_reply.ui import OperationsUI
 
-        start = mock.Mock()
-        ui = SimpleNamespace(
-            _startup_auto_reply_attempted=False,
-            accounts_data=[{"user_id": "online", "status": 1}],
-            logger=mock.Mock(),
-            startup_auto_reply_candidates=lambda accounts, is_running: accounts,
-            _run_llm_preflight=start,
+        operations_ui = OperationsUI.__new__(OperationsUI)
+        operations_ui._hide_account_info = True
+        self.assertEqual(
+            operations_ui._display_shop_name("棉花糖童装城堡"), "棉花*****"
         )
-        with mock.patch("ui.auto_reply.ui.config.get", return_value=True):
-            OperationsUI._maybe_auto_start_reply(ui)
-            OperationsUI._maybe_auto_start_reply(ui)
+        self.assertEqual(
+            operations_ui._display_account_value("zsgkefu"), "zs*****"
+        )
 
-        start.assert_called_once_with(ui.accounts_data, interactive=False)
+        operations_ui._hide_account_info = False
+        self.assertEqual(
+            operations_ui._display_shop_name("棉花糖童装城堡"), "棉花糖童装城堡"
+        )
+        self.assertEqual(
+            operations_ui._display_account_value("zsgkefu"), "zsgkefu"
+        )
 
 
 class StartupServiceRegressionTests(unittest.TestCase):
@@ -1529,6 +1516,58 @@ class LifecycleStopRaceRegressionTests(unittest.IsolatedAsyncioTestCase):
             }
             await channel.stop_account("shop-1", "user-1")
         self.assertTrue(channel._stop_event.is_set())
+
+
+class PlatformStatusRegressionTests(unittest.TestCase):
+    def _account(self):
+        return {
+            "channel_name": "pinduoduo",
+            "shop_id": "shop-1",
+            "user_id": "user-1",
+            "username": "seller",
+            "cookies": {"foo": "bar"},
+        }
+
+    def test_platform_status_updates_database_only_after_platform_success(self):
+        from ui.auto_reply.threads import set_platform_account_status
+
+        account = self._account()
+        with mock.patch(
+            "Channel.pinduoduo.utils.API.Set_up_online.AccountMonitor"
+        ) as monitor_class, mock.patch(
+            "service.account_service.account_service"
+        ) as account_service_mock:
+            monitor_class.return_value.set_csstatus.return_value = True
+            account_service_mock.update_account_status.return_value = True
+
+            success, error = set_platform_account_status(account, 1)
+
+        self.assertTrue(success)
+        self.assertEqual(error, "")
+        monitor_class.return_value.set_csstatus.assert_called_once_with(1)
+        account_service_mock.update_account_status.assert_called_once_with(
+            channel_name="pinduoduo",
+            shop_id="shop-1",
+            user_id="user-1",
+            status=1,
+        )
+
+    def test_platform_failure_does_not_mark_account_online_locally(self):
+        from ui.auto_reply.threads import set_platform_account_status
+
+        account = self._account()
+        with mock.patch(
+            "Channel.pinduoduo.utils.API.Set_up_online.AccountMonitor"
+        ) as monitor_class, mock.patch(
+            "service.account_service.account_service"
+        ) as account_service_mock:
+            monitor_class.return_value.set_csstatus.return_value = False
+
+            success, error = set_platform_account_status(account, 1)
+
+        self.assertFalse(success)
+        self.assertIn("平台状态设置失败", error)
+        account_service_mock.update_account_status.assert_not_called()
 
 
 if __name__ == "__main__":

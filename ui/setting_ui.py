@@ -8,7 +8,7 @@ import uuid
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, QUrl
 from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QVBoxLayout, QWidget, QLabel,
                             QFormLayout, QGroupBox, QMessageBox, QDialog,
-                            QListWidgetItem)
+                            QListWidgetItem, QLayout, QSizePolicy)
 from PyQt6.QtGui import QDesktopServices, QFont
 from qfluentwidgets import (CardWidget, SubtitleLabel, CaptionLabel, BodyLabel,
                            PrimaryPushButton, PushButton, StrongBodyLabel,
@@ -806,8 +806,6 @@ class BusinessHoursCard(CardWidget):
         if end_time.isValid():
             self.end_time_picker.setTime(end_time)
         self.auto_start_reply_switch.setChecked(config.get("auto_start_reply", True))
-
-
 class SystemBehaviorCard(CardWidget):
     """系统启动与通知设置。"""
 
@@ -1016,6 +1014,11 @@ class SettingUI(QFrame):
         content_layout.setSpacing(20)
         content_layout.setContentsMargins(20, 20, 20, 20)
         content_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        content_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+        content_container.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Minimum,
+        )
 
         # 创建配置卡片
         self.llm_config_card = LLMConfigCard()
@@ -1025,6 +1028,19 @@ class SettingUI(QFrame):
         self.data_management_card = DataManagementCard(
             str(data_maintenance_service.ensure_data_directory())
         )
+
+        for card in (
+            self.llm_config_card,
+            self.prompt_config_card,
+            self.business_hours_card,
+            self.system_behavior_card,
+            self.data_management_card,
+        ):
+            card.setSizePolicy(
+                QSizePolicy.Policy.Expanding,
+                QSizePolicy.Policy.Minimum,
+            )
+            card.setMinimumHeight(card.sizeHint().height())
 
         # 添加到布局
         content_layout.addWidget(self.llm_config_card)
@@ -1077,6 +1093,7 @@ class SettingUI(QFrame):
 
             # 验证并设置配置
             self._validateAndSetConfig(loaded_config)
+            self._stabilize_card_heights()
             self.logger.info("配置加载成功")
 
         except Exception as e:
@@ -1097,7 +1114,20 @@ class SettingUI(QFrame):
             default_config["llm"]["model_name"] = "doubao-seed-1-6-flash-250828"
 
         self._validateAndSetConfig(default_config)
+        self._stabilize_card_heights()
         self.logger.info("已加载默认配置")
+
+    def _stabilize_card_heights(self) -> None:
+        """Keep populated cards from being compressed by later button updates."""
+        for card in (
+            self.llm_config_card,
+            self.prompt_config_card,
+            self.business_hours_card,
+            self.system_behavior_card,
+            self.data_management_card,
+        ):
+            card.adjustSize()
+            card.setMinimumHeight(max(card.minimumHeight(), card.sizeHint().height()))
 
     def _validateAndSetConfig(self, config_data):
         """验证并设置配置"""

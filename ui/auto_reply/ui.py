@@ -34,11 +34,13 @@ from qfluentwidgets import (
 
 from config import config
 from service.account_service import account_service
-from service.llm_service import validate_llm_config
 from service.system_notification_service import notify_system
 from utils.logger_loguru import get_logger
 from .manager import auto_reply_manager
-from .threads import AccountIdentityThread, LLMPreflightThread
+from .threads import (
+    AccountIdentityThread,
+    SetStatusThread,
+)
 
 
 class OperationsUI(QFrame):
@@ -55,10 +57,10 @@ class OperationsUI(QFrame):
         self._startup_auto_reply_attempted = False
         self.identity_thread = None
         self._selected_keys: set[str] = set()
-        self._pending_start_accounts: list[dict[str, Any]] = []
-        self._pending_start_interactive = True
-        self.llm_preflight_thread = None
+        self._status_threads: dict[str, SetStatusThread] = {}
         self._reported_ai_failures: set[str] = set()
+        self._reported_connection_errors: dict[str, str] = {}
+        self._hide_account_info = True
         self._build_ui()
 
         self.stats_timer = QTimer(self)
@@ -96,11 +98,22 @@ class OperationsUI(QFrame):
         self.stop_all_btn = PushButton("批量停止")
         self.stop_all_btn.setIcon(FIF.CANCEL)
         self.stop_all_btn.clicked.connect(self.stop_selected)
+        self.account_privacy_btn = PushButton("显示账户信息")
+        self.account_privacy_btn.setIcon(FIF.VIEW)
+        self.account_privacy_btn.setToolTip("切换店铺名称和账号信息的显示方式")
+        self.account_privacy_btn.clicked.connect(self._toggle_account_info)
         self.refresh_btn.setFixedSize(90, 40)
         self.add_btn.setFixedSize(120, 40)
         self.start_all_btn.setFixedSize(120, 40)
         self.stop_all_btn.setFixedSize(120, 40)
-        for button in (self.refresh_btn, self.add_btn, self.start_all_btn, self.stop_all_btn):
+        self.account_privacy_btn.setFixedSize(130, 40)
+        for button in (
+            self.refresh_btn,
+            self.add_btn,
+            self.start_all_btn,
+            self.stop_all_btn,
+            self.account_privacy_btn,
+        ):
             title_row.addWidget(button)
         layout.addLayout(title_row)
 
@@ -186,6 +199,8 @@ class OperationsUI(QFrame):
         key = self.account_key(account)
         thread = auto_reply_manager.running_accounts.get(key)
         if key in auto_reply_manager.connected_accounts:
+            if account.get("last_error"):
+                return "异常"
             return "运行中"
         if thread is not None and hasattr(thread, "isRunning") and thread.isRunning():
             return "连接中"
@@ -226,7 +241,8 @@ class OperationsUI(QFrame):
     def startup_auto_reply_candidates(accounts, is_running):
         """返回本次启动时可自动开启回复的在线账号。"""
         return [
-            account for account in accounts
+            account
+            for account in accounts
             if account.get("status") == 1 and not is_running(account)
         ]
 
@@ -245,7 +261,7 @@ class OperationsUI(QFrame):
             self.logger.info("启动时没有可自动开启回复的在线账号")
             return
         self.logger.info(f"启动时将自动开启 {len(accounts)} 个账号的自动回复")
-        self._run_llm_preflight(accounts, interactive=False)
+        self._start_auto_reply_accounts(accounts, interactive=False)
 
     def updateStats(self):
         self.summary_label.setText(self._summary_text())
@@ -284,7 +300,10 @@ class OperationsUI(QFrame):
             shops[(account.get("channel_name", ""), account.get("shop_id", ""))] = account.get("shop_name") or account.get("shop_id", "")
         for (channel, shop_id), shop_name in sorted(shops.items(), key=lambda item: item[1]):
             index = self.shop_filter.count()
-            self.shop_filter.addItem(f"{shop_name} · {shop_id}")
+            self.shop_filter.addItem(
+                f"{self._display_shop_name(shop_name)} · "
+                f"{self._display_account_value(shop_id)}"
+            )
             self.shop_filter.setItemData(index, f"{channel}|{shop_id}")
         if current:
             index = self.shop_filter.findData(current)
@@ -316,6 +335,33 @@ class OperationsUI(QFrame):
             visible.append(account)
         return visible
 
+    def _toggle_account_info(self) -> None:
+        self._hide_account_info = not self._hide_account_info
+        self.account_privacy_btn.setText(
+            "显示账户信息" if self._hide_account_info else "隐藏账户信息"
+        )
+        self.account_privacy_btn.setIcon(
+            FIF.VIEW if self._hide_account_info else FIF.HIDE
+        )
+        self._populate_shop_filter()
+        self.refresh_table()
+
+    def _display_shop_name(self, value: str) -> str:
+        value = str(value or "")
+        if not self._hide_account_info:
+            return value
+        if len(value) <= 2:
+            return "*" * len(value)
+        return f"{value[:2]}*****"
+
+    def _display_account_value(self, value: str) -> str:
+        value = str(value or "")
+        if not self._hide_account_info:
+            return value
+        if not value:
+            return ""
+        return f"{value[:2]}*****"
+
     def refresh_table(self, *_args):
         selected = set(self._selected_keys)
         self.table.setRowCount(0)
@@ -324,12 +370,17 @@ class OperationsUI(QFrame):
             grouped[(account.get("channel_name", ""), account.get("shop_id", ""))].append(account)
         row = 0
         for (channel, shop_id), accounts in sorted(grouped.items(), key=lambda item: item[1][0].get("shop_name", "")):
-            shop_name = accounts[0].get("shop_name") or shop_id
+            shop_name = self._display_shop_name(accounts[0].get("shop_name") or shop_id)
             running = sum(self.reply_status(account) == "运行中" for account in accounts)
             errors = sum(self.health_status(account, self.reply_status(account)) != "正常" for account in accounts)
             self.table.insertRow(row)
             self._set_item(row, 0, "", enabled=False)
-            self._set_item(row, 1, f"{shop_name}  ·  {shop_id}", bold=True)
+            self._set_item(
+                row,
+                1,
+                f"{shop_name}  ·  {self._display_account_value(shop_id)}",
+                bold=True,
+            )
             self._set_item(row, 2, f"{len(accounts)} 个账号")
             self._set_item(row, 3, "店铺汇总")
             self._set_item(row, 4, f"{running}/{len(accounts)} 运行")
@@ -347,7 +398,12 @@ class OperationsUI(QFrame):
                 checkbox.setCheckState(Qt.CheckState.Checked if key in selected else Qt.CheckState.Unchecked)
                 checkbox.setData(Qt.ItemDataRole.UserRole, key)
                 self.table.setItem(row, 0, checkbox)
-                self._set_item(row, 1, f"    {account.get('username', '')}\n    {account.get('user_id', '')}")
+                self._set_item(
+                    row,
+                    1,
+                    "    " + self._display_account_value(account.get("username", ""))
+                    + "\n    " + self._display_account_value(account.get("user_id", "")),
+                )
                 self._set_item(row, 2, self._identity_text(account.get("is_main_account")))
                 self._set_item(row, 3, self.platform_status(account))
                 reply = self.reply_status(account)
@@ -456,6 +512,39 @@ class OperationsUI(QFrame):
         elif selected == delete_action:
             self.delete_account(account)
 
+    def _set_platform_status(self, account: dict, target_status: int) -> None:
+        """Set PDD online/offline state and refresh the table after success."""
+        key = self.account_key(account)
+        active = self._status_threads.get(key)
+        if active is not None and active.isRunning():
+            return
+
+        thread = SetStatusThread(account, target_status)
+        self._status_threads[key] = thread
+        thread.status_set_success.connect(self._on_platform_status_success)
+        thread.status_set_failed.connect(self._on_platform_status_failed)
+        thread.finished.connect(lambda key=key: self._status_threads.pop(key, None))
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+
+    def _on_platform_status_success(self, account: dict, target_status: int) -> None:
+        account["status"] = target_status
+        status_text = "在线" if target_status == 1 else "离线"
+        self.logger.info(
+            f"账号 {account.get('username', account.get('user_id', ''))} 已设置为{status_text}"
+        )
+        self.load_accounts()
+
+    def _on_platform_status_failed(self, account: dict, error_message: str) -> None:
+        self.logger.warning(
+            f"账号 {account.get('username', account.get('user_id', ''))} 平台状态设置失败: {error_message}"
+        )
+        QMessageBox.warning(
+            self,
+            "平台状态设置失败",
+            f"账号 {account.get('username', account.get('user_id', ''))}：{error_message}",
+        )
+
     def _focus_shop(self, scope):
         if not scope:
             return
@@ -485,7 +574,7 @@ class OperationsUI(QFrame):
         if not eligible:
             QMessageBox.information(self, "没有可启动账号", "请先选择在线且未运行自动回复的账号。")
             return
-        self._run_llm_preflight(eligible)
+        self._start_auto_reply_accounts(eligible)
 
     def stop_selected(self):
         accounts = [a for a in self._selected_accounts() if auto_reply_manager.is_running(a)]
@@ -505,45 +594,10 @@ class OperationsUI(QFrame):
         elif account.get("status") != 1:
             QMessageBox.warning(self, "无法启动", "账号必须先验证并处于在线状态。")
         else:
-            self._run_llm_preflight([account])
+            self._start_auto_reply_accounts([account])
 
-    def _run_llm_preflight(self, accounts, interactive=True):
-        if self.llm_preflight_thread and self.llm_preflight_thread.isRunning():
-            if interactive:
-                QMessageBox.information(self, "正在检查", "正在验证 AI 配置，请稍候。")
-            return
-        try:
-            llm_config = validate_llm_config()
-        except Exception as exc:
-            if interactive:
-                QMessageBox.warning(self, "AI 配置未完成", str(exc))
-            else:
-                self.logger.warning(f"启动时自动开启回复已跳过: {exc}")
-            return
-        self._pending_start_accounts = list(accounts)
-        self._pending_start_interactive = interactive
-        self.start_all_btn.setEnabled(False)
-        self.llm_preflight_thread = LLMPreflightThread(llm_config, self)
-        self.llm_preflight_thread.test_finished.connect(self._on_preflight_finished)
-        self.llm_preflight_thread.finished.connect(self._clear_preflight)
-        self.llm_preflight_thread.finished.connect(self.llm_preflight_thread.deleteLater)
-        self.llm_preflight_thread.start()
-
-    def _clear_preflight(self):
-        self.llm_preflight_thread = None
-        self.start_all_btn.setEnabled(bool(self._selected_accounts()))
-
-    def _on_preflight_finished(self, success: bool, message: str):
-        accounts = self._pending_start_accounts
-        self._pending_start_accounts = []
-        interactive = getattr(self, "_pending_start_interactive", True)
-        if not success:
-            if interactive:
-                QMessageBox.warning(self, "AI 服务不可用", f"无法开启自动回复：{message}")
-            else:
-                self.logger.warning(f"启动时自动开启回复失败: {message}")
-                notify_system("自动回复启动失败", message, "warning")
-            return
+    def _start_auto_reply_accounts(self, accounts, interactive=True):
+        """Start platform connections without making LLM health a prerequisite."""
         started = 0
         for account in accounts:
             connection_failed = (
@@ -565,6 +619,10 @@ class OperationsUI(QFrame):
     def _on_reply_failed(self, account, error):
         account["last_error"] = error
         self.refresh_runtime_state()
+        key = self.account_key(account)
+        if self._reported_connection_errors.get(key) == error:
+            return
+        self._reported_connection_errors[key] = error
         notify_system(
             "自动回复连接失败",
             f"账号 {account.get('username', '')}：{error}",
@@ -574,6 +632,8 @@ class OperationsUI(QFrame):
 
     def _on_reply_connected(self, account):
         account["last_error"] = ""
+        self._reported_connection_errors.pop(self.account_key(account), None)
+        self._reported_ai_failures.discard(self.account_key(account))
         self.refresh_runtime_state()
         notify_system(
             "自动回复已连接",
@@ -597,15 +657,14 @@ class OperationsUI(QFrame):
         if key in self._reported_ai_failures:
             return
         self._reported_ai_failures.add(key)
-        auto_reply_manager.stop_auto_reply(account)
         account["last_error"] = error
         self.refresh_runtime_state()
         notify_system(
             "AI 服务已失效",
-            f"账号 {account.get('username', '')} 已停止自动回复：{error}",
+            f"账号 {account.get('username', '')} 保持客服连接，但暂时无法自动回复：{error}",
             "critical",
         )
-        QMessageBox.warning(self, "AI 服务已失效", f"账号 {account.get('username', '')} 已停止自动回复：{error}")
+        QMessageBox.warning(self, "AI 服务已失效", f"账号 {account.get('username', '')} 保持客服连接，但暂时无法自动回复：{error}")
 
     def add_account(self):
         from ui.user_ui import AddAccountDialog, LoginThread
@@ -629,6 +688,18 @@ class OperationsUI(QFrame):
             if not account_service.get_shop(channel, shop_id):
                 account_service.add_shop(channel, shop_id, result["shop_name"], result.get("shop_logo"), "由登录自动添加")
             ok = account_service.add_account(channel, shop_id, result["user_id"], result["username"], result["password"], result.get("cookies"), result.get("is_main_account"))
+            if ok:
+                # 新账号登录成功后，必须同步平台客服状态；仅保存 cookies
+                # 或建立 WebSocket 不能让平台把新客户分配给该账号。
+                self._set_platform_status(
+                    {
+                        **result,
+                        "channel_name": channel,
+                        "shop_id": shop_id,
+                        "cookies": result.get("cookies"),
+                    },
+                    1,
+                )
             QMessageBox.information(self, "添加成功", "账号已加入店铺运营列表。" if ok else "账号可能已存在，未重复添加。")
             self.load_accounts()
         except Exception as exc:
@@ -665,11 +736,21 @@ class OperationsUI(QFrame):
 
     def _on_verify_finished(self, account, result):
         if isinstance(result, dict):
-            account_service.update_account_cookies(account["channel_name"], account["shop_id"], account["user_id"], result.get("cookies"))
-            account_service.update_account_status(account["channel_name"], account["shop_id"], account["user_id"], 1)
+            cookies = result.get("cookies")
+            cookies_updated = account_service.update_account_cookies(
+                account["channel_name"], account["shop_id"], account["user_id"], cookies
+            )
+            if not cookies_updated:
+                QMessageBox.warning(self, "验证失败", "登录成功，但账号 cookies 保存失败。")
+                self.load_accounts()
+                return
+            account["cookies"] = cookies
             if "is_main_account" in result:
                 account_service.update_account_identity(account["channel_name"], account["shop_id"], account["user_id"], result["is_main_account"])
-            QMessageBox.information(self, "验证成功", f"账号 {account.get('username', '')} 已在线。")
+            # 登录成功不等于平台客服在线；必须再调用 set_csstatus(1)，否则
+            # WebSocket 虽然可收发已有会话，但平台不会把新客分配给该账号。
+            self._set_platform_status(account, 1)
+            QMessageBox.information(self, "验证成功", f"账号 {account.get('username', '')} 登录成功，登录态已保存。")
         else:
             account_service.update_account_status(account["channel_name"], account["shop_id"], account["user_id"], 3)
             QMessageBox.warning(self, "验证失败", f"账号 {account.get('username', '')} 登录验证失败。")

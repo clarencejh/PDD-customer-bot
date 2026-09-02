@@ -1,7 +1,6 @@
 # 自动回复管理器模块
 from typing import Dict
 from utils.logger_loguru import get_logger
-from service.llm_service import validate_llm_config
 from .threads import AutoReplyThread
 
 
@@ -22,7 +21,6 @@ class AutoReplyManager:
     ) -> bool:
         """启动账号自动回复"""
         try:
-            validate_llm_config()
             account_key = self._account_key(account_data)
 
             # 检查是否已经在运行

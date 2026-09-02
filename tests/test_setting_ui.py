@@ -3,7 +3,7 @@ import unittest
 
 from PyQt6.QtWidgets import QApplication
 
-from ui.setting_ui import LLMConfigCard, inspect_llm_draft
+from ui.setting_ui import LLMConfigCard, SettingUI, inspect_llm_draft
 from utils.llm_provider import capability_confirmation_for
 
 
@@ -78,6 +78,26 @@ class SettingPolicyTests(unittest.TestCase):
         )
         self.assertEqual(state["state"], "unsupported")
         self.assertIn("embedding", state["error"].safe_message)
+
+    def test_settings_cards_do_not_collapse_when_actions_change_state(self):
+        page = SettingUI()
+        page.resize(1400, 800)
+        page.show()
+        self.app.processEvents()
+
+        page.llm_config_card.setActionsEnabled(False)
+        self.app.processEvents()
+
+        for card in (
+            page.llm_config_card,
+            page.prompt_config_card,
+            page.business_hours_card,
+            page.system_behavior_card,
+            page.data_management_card,
+        ):
+            self.assertGreaterEqual(card.height(), card.minimumHeight())
+
+        page.close()
 
 
 if __name__ == "__main__":

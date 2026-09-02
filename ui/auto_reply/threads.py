@@ -9,6 +9,42 @@ from service.llm_service import llm_error_message, test_llm_connection
 LogoLoaderThread = ShopLogoLoader
 
 
+def set_platform_account_status(account_data: dict, target_status: int) -> tuple[bool, str]:
+    """Set the PDD platform status and persist it only after API success."""
+    from Channel.pinduoduo.utils.API.Set_up_online import AccountMonitor
+    from service.account_service import account_service
+
+    channel_name = account_data.get("channel_name", "pinduoduo")
+    shop_id = account_data.get("shop_id")
+    user_id = account_data.get("user_id")
+    cookies = account_data.get("cookies")
+    if not cookies or not shop_id or not user_id:
+        return False, "账号缺少 cookies 或身份信息，无法设置平台状态"
+
+    try:
+        monitor = AccountMonitor(
+            cookies,
+            shop_id=shop_id,
+            user_id=user_id,
+            channel_name=channel_name,
+        )
+        if not monitor.set_csstatus(target_status):
+            return False, "平台状态设置失败，请检查账号登录状态和网络连接"
+        if not account_service.update_account_status(
+            channel_name=channel_name,
+            shop_id=shop_id,
+            user_id=user_id,
+            status=target_status,
+        ):
+            return False, "平台状态已返回成功，但本地账号状态保存失败"
+        return True, ""
+    except Exception as exc:
+        get_logger("AccountStatus").error(
+            f"设置平台账号状态失败: error_type={type(exc).__name__}"
+        )
+        return False, "设置平台状态时发生异常，请检查账号登录状态和网络连接"
+
+
 class AutoReplyThread(QThread):
     """自动回复线程 - 每个账号独立的WebSocket连接线程"""
 
@@ -229,50 +265,14 @@ class SetStatusThread(QThread):
 
     def run(self):
         """在后台线程中执行状态更新"""
-        from Channel.pinduoduo.utils.API.Set_up_online import AccountMonitor
-        from service.account_service import account_service
-
-        try:
-            # 1. 调用API设置平台状态
-            cookies = self.account_data.get("cookies")
-            if not cookies:
-                raise ValueError("账号缺少cookies，无法设置状态")
-
-            # 获取账户信息用于自动重新登录
-            shop_id = self.account_data.get("shop_id")
-            user_id = self.account_data.get("user_id")
-            channel_name = self.account_data.get("channel_name", "pinduoduo")
-
-            account_monitor = AccountMonitor(cookies, shop_id=shop_id, user_id=user_id, channel_name=channel_name)
-
-            api_success = account_monitor.set_csstatus(self.target_status)
-
-            if not api_success:
-                # API调用失败
-                self.status_set_failed.emit(self.account_data, "平台状态设置失败")
-                return
-
-            # 2. 更新数据库状态
-            db_success = account_service.update_account_status(
-                channel_name=self.account_data["channel_name"],
-                shop_id=self.account_data["shop_id"],
-                user_id=self.account_data["user_id"],
-                status=self.target_status
-            )
-
-            if db_success:
-                # 发射成功信号
-                self.status_set_success.emit(self.account_data, self.target_status)
-            else:
-                # 发射失败信号
-                self.status_set_failed.emit(self.account_data, "数据库状态更新失败")
-
-        except KeyError:
-            # 如果缺少 'user_id' 等关键信息
-            self.status_set_failed.emit(self.account_data, "账号数据不完整，无法设置状态")
-        except Exception as e:
-            # 其他异常
-            self.status_set_failed.emit(self.account_data, str(e))
+        success, error = set_platform_account_status(
+            self.account_data,
+            self.target_status,
+        )
+        if success:
+            self.status_set_success.emit(self.account_data, self.target_status)
+        else:
+            self.status_set_failed.emit(self.account_data, error)
 
 
 __all__ = [

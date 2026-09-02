@@ -1,5 +1,4 @@
 """账号/店铺/渠道服务层 - 封装账号管理与登录，解耦 UI 与 database/Channel。"""
-import uuid
 
 from database.db_manager import db_manager
 
@@ -58,7 +57,6 @@ class AccountService:
         channel_name: str | None = None,
         shop_id: str | None = None,
         user_id: str | None = None,
-        login_mode: str = "password",
     ):
         """使用账号密码登录拼多多，返回账号信息 dict 或 False。"""
         from Channel.pinduoduo.pdd_login import login_pdd
@@ -68,23 +66,18 @@ class AccountService:
             raise ValueError("验证已有账号时必须提供完整的渠道、店铺和用户标识")
         if channel_name is not None and channel_name != "pinduoduo":
             raise ValueError(f"暂不支持渠道登录: {channel_name}")
-        if login_mode not in {"password", "qr"}:
-            raise ValueError(f"不支持的登录方式: {login_mode}")
-        if login_mode == "password" and (not name.strip() or not password):
+        if not name.strip() or not password:
             raise ValueError("账号密码登录需要用户名和密码")
 
         profile_scope = None
         if channel_name is not None:
             profile_scope = f"{channel_name}:{shop_id}:{user_id}"
         login_name = name.strip()
-        if login_mode == "qr" and not login_name:
-            login_name = f"qr-{uuid.uuid4().hex}"
         return await login_pdd(
             login_name,
             password,
             headless=headless,
             profile_scope=profile_scope,
-            login_mode=login_mode,
         )
 
 

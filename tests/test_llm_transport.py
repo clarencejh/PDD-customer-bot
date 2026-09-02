@@ -287,6 +287,26 @@ class EndpointPolicyTests(unittest.TestCase):
         )
         self.assertEqual(transport.validate_transport_endpoint(profile), profile.api_base)
 
+    def test_fake_ip_dual_stack_results_are_allowed_for_proxy_dns(self):
+        profile = _profile(
+            LLMProvider.OPENAI_COMPATIBLE,
+            "vendor-model",
+            "https://cccl.eu.org/v1",
+            EndpointTrustMode.EXPLICIT,
+        )
+        fake_ip_results = [
+            (2, 1, 6, "", ("198.18.0.152", 443)),
+            (30, 1, 6, "", ("::ffff:0:c612:98", 443, 0, 0)),
+        ]
+        with mock.patch.object(
+            transport.socket,
+            "getaddrinfo",
+            return_value=fake_ip_results,
+        ):
+            self.assertEqual(
+                transport.validate_transport_endpoint(profile), profile.api_base
+            )
+
     def test_local_http_endpoint_allowed_only_with_local_opt_in(self):
         with self.assertRaises(transport.EndpointPolicyError):
             transport.validate_transport_endpoint(

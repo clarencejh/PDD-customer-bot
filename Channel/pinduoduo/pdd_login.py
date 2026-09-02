@@ -391,7 +391,7 @@ class PDDLogin():
             text = text[:2000] + "...(截断)"
         self.logger.warning(f"{headline}\n浏览器 stderr:\n{text}")
 
-    async def login(self, headless=False, login_mode="password"):
+    async def login(self, headless=False):
         """使用账号密码登录
 
         Args:
@@ -416,23 +416,12 @@ class PDDLogin():
             # 访问登录页面
             await page.goto(self.base_url)
             
-            if login_mode == "qr":
-                # The login page normally defaults to QR login. Click the QR
-                # tab when it is available, then wait for the browser redirect.
-                qr_tab = page.get_by_text("扫码登录", exact=False).first
-                try:
-                    if await qr_tab.is_visible(timeout=2000):
-                        await qr_tab.click()
-                except Exception:
-                    pass
-                login_timeout = 180000
-            else:
-                await page.click("div.Common_item__3diIn:has-text('账号登录')")
-                await page.wait_for_selector("input[type='text']")
-                await page.fill("input[type='text']", self.name)
-                await page.fill("input[type='password']", self.password)
-                await page.click("button:has-text('登录')")
-                login_timeout = 30000
+            await page.click("div.Common_item__3diIn:has-text('账号登录')")
+            await page.wait_for_selector("input[type='text']")
+            await page.fill("input[type='text']", self.name)
+            await page.fill("input[type='password']", self.password)
+            await page.click("button:has-text('登录')")
+            login_timeout = 30000
 
             await page.wait_for_function(
                 """() => {
@@ -580,7 +569,7 @@ class PDDLogin():
         return shop_id, shop_name, mallLogo
     
 async def login_pdd(
-    name, password, headless=False, profile_scope=None, login_mode="password"
+    name, password, headless=False, profile_scope=None
 ):
     """
     使用账号密码登录并返回账号、店铺信息，不直接操作数据库。
@@ -596,7 +585,7 @@ async def login_pdd(
         name=name, password=password, profile_scope=profile_scope
     )
     cookies_json = await pdd_login.login(
-        headless=headless, login_mode=login_mode
+        headless=headless
     )
     if not cookies_json:
         pdd_login.logger.error(f"账号 '{name}' 登录失败，未能获取cookies")
@@ -617,21 +606,10 @@ async def login_pdd(
             pdd_login.logger.error("登录会话与指定账号不一致，已失败并不会应用 cookies")
             return False
 
-        # Initial UI login historically used the username as the profile key.
-        # Preserve that data while creating the account-scoped profile used by
-        # subsequent refresh/relogin operations.
+        # Preserve the initial username profile while creating the account-scoped
+        # profile used by subsequent refresh/relogin operations.
         scoped_profile = f"{pdd_login.channel_name}:{shop_id}:{user_id}"
-        source_profile = pdd_login._profile_dir()
-        target_profile = pdd_login._profile_dir(scoped_profile)
         pdd_login.migrate_profile(scoped_profile)
-        if login_mode == "qr" and source_profile != target_profile and target_profile.exists():
-            try:
-                shutil.rmtree(source_profile)
-            except OSError as exc:
-                pdd_login.logger.warning(
-                    f"temporary QR profile cleanup skipped: error_type={type(exc).__name__}"
-                )
-
         pdd_login.logger.info(f"账号 '{name}' 登录成功，获取到店铺: {shop_name}({shop_id})")
 
         # 登录成功，返回包含所有信息的字典
@@ -641,7 +619,7 @@ async def login_pdd(
             "shop_name": shop_name,
             "shop_logo": mallLogo,
             "user_id": user_id,
-            "username": str(user_name or user_id) if login_mode == "qr" else name,
+            "username": name,
             "password": password, # 使用传入的密码
             "cookies": cookies_json,
             "is_main_account": is_main_account,
