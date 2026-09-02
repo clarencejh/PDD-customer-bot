@@ -31,7 +31,7 @@ from bridge.reply import Reply, ReplyType
 from Agent.CustomerAgent.custom.session_manager import SessionManager
 from Agent.CustomerAgent.custom.tool_decorator import get_tools_for_llm
 from utils.logger_loguru import get_logger
-from service.llm_service import LLMServiceError, llm_error_message, validate_llm_config
+from service.llm_service import LLMServiceError, llm_error_message
 
 # 导入重构后的模块
 from Agent.CustomerAgent.custom.agent_config import (
@@ -96,6 +96,7 @@ class CustomerAgent(Bot):
 
         # 子组件（延迟初始化）
         self._llm_client: Optional[LLMClient] = None
+        self._active_profile = None
         self._message_builder: Optional[MessageBuilder] = None
         self._tool_executor: Optional[ToolExecutor] = None
         self._session_manager: Optional[SessionManager] = None
@@ -124,18 +125,13 @@ class CustomerAgent(Bot):
             # 1. 从配置文件加载配置
             self._config = AgentConfig.load_from_config()
 
-            # 2. 验证配置
-            validate_llm_config({
-                "api_key": self._config.api_key,
-                "api_base": self._config.api_base,
-                "model_name": self._config.model_name,
-            })
+            # 2. 验证配置与快照完整校验后的 profile；后续设置页保存不得改动
+            #    此账号运行中的客户端（profile 由供应商身份/模型/端点/策略构成）。
+            self._active_profile = self._config.profile
 
             # 3. 初始化 LLM 客户端
             self._llm_client = LLMClient(
-                api_key=self._config.api_key,
-                api_base=self._config.api_base,
-                model_name=self._config.model_name,
+                profile=self._active_profile,
                 temperature=self._config.temperature,
             )
             await self._llm_client.initialize()
@@ -191,6 +187,7 @@ class CustomerAgent(Bot):
             self._session_manager = None
             self._message_builder = None
             self._tool_executor = None
+            self._active_profile = None
             self._tools = []
             self._conversation_locks.clear()
             self._is_initialized = False
@@ -414,6 +411,7 @@ class CustomerAgent(Bot):
                         {"role": "user", "content": summary_prompt},
                     ],
                     tool_choice="none",
+                    use_tools=False,
                 )
                 return response.content or "[摘要生成失败]"
             except Exception as e:

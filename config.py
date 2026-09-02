@@ -18,6 +18,13 @@ from urllib.parse import urlsplit, urlunsplit
 from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
 from utils.runtime_path import get_config_path
 from utils.secret_store import protect_secret, unprotect_secret
+from utils.llm_provider import (
+    EndpointTrustMode,
+    LLMProvider,
+    ToolPolicy,
+    build_llm_profile,
+    migrate_llm_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +40,23 @@ class ModelType(str, Enum):
 class LLMConfig(BaseModel):
     """LLM 配置模型"""
     model_config = ConfigDict(arbitrary_types_allowed=True)
+    provider: LLMProvider = Field(
+        default=LLMProvider.OPENAI_COMPATIBLE,
+        description="模型供应商身份",
+    )
     model_name: str = Field(default="", description="模型名称")
     api_key: str = Field(default="", description="API密钥")
     api_base: str = Field(default="", description="API地址")
+    endpoint_trust_mode: EndpointTrustMode = Field(
+        default=EndpointTrustMode.DEFAULT,
+        description="端点信任模式",
+    )
+    tool_policy: ToolPolicy = Field(
+        default=ToolPolicy.ENABLED,
+        description="工具调用策略",
+    )
+    capability_confirmation: str = Field(default="", description="能力确认指纹")
+    tool_trust_confirmation: str = Field(default="", description="工具端点信任指纹")
 
     @field_validator("model_name", "api_key")
     @classmethod
@@ -151,9 +172,14 @@ config_base = {
     },
     "db_path": "./temp/channel_shop.db",
     "llm": {
+        "provider": LLMProvider.OPENAI_COMPATIBLE.value,
         "model_name": "",
         "api_key": "",
-        "api_base": ""
+        "api_base": "",
+        "endpoint_trust_mode": EndpointTrustMode.DEFAULT.value,
+        "tool_policy": ToolPolicy.ENABLED.value,
+        "capability_confirmation": "",
+        "tool_trust_confirmation": "",
     },
     "active_llm_provider": "default",
     "auto_start_reply": True,
@@ -163,9 +189,14 @@ config_base = {
         {
             "id": "default",
             "name": "默认供应商",
+            "provider": LLMProvider.OPENAI_COMPATIBLE.value,
             "model_name": "",
             "api_key": "",
-            "api_base": ""
+            "api_base": "",
+            "endpoint_trust_mode": EndpointTrustMode.DEFAULT.value,
+            "tool_policy": ToolPolicy.ENABLED.value,
+            "capability_confirmation": "",
+            "tool_trust_confirmation": "",
         }
     ],
     "prompt": {
@@ -227,6 +258,7 @@ class Config:
         self.config_path = Path(config_path) if config_path else get_config_path()
         self.last_error: Optional[str] = None
         self._needs_secret_migration = False
+        self._needs_schema_migration = False
         self.auto_create = auto_create
 
         # 线程安全锁
@@ -249,7 +281,16 @@ class Config:
                 raw_config_data = json.load(f)
 
             self._needs_secret_migration = self._has_plaintext_secrets(raw_config_data)
-            config_data = self._restore_secrets(raw_config_data)
+            migrated_config, self._needs_schema_migration = migrate_llm_config(
+                raw_config_data
+            )
+            # 对 llm_providers 的每个条目也应用同样的 schema 迁移（显式供应商身份、
+            # 端点信任模式、工具策略与确认指纹），保证多供应商列表与单一 llm 对象一致。
+            self._needs_schema_migration = (
+                self._migrate_llm_provider_entries(migrated_config)
+                or self._needs_schema_migration
+            )
+            config_data = self._restore_secrets(migrated_config)
 
             # 验证配置格式
             validated_config = ConfigModel(**config_data)
@@ -280,10 +321,14 @@ class Config:
             try:
                 self._config = self._load_config()
                 self.last_error = None
-                if os.name == "nt" and self._needs_secret_migration:
-                    # Migrate legacy plaintext API keys on the next successful
-                    # load; this is an atomic rewrite and preserves all fields.
-                    self._needs_secret_migration = not self.save()
+                if (os.name == "nt" and self._needs_secret_migration) or self._needs_schema_migration:
+                    # 只有在完整类型校验通过后才进行持久化迁移；save 原子替换文件，
+                    # 保留 DPAPI 密钥保护并补齐新增的 provider/信任/策略字段。
+                    if self.save():
+                        self._needs_secret_migration = False
+                        self._needs_schema_migration = False
+                    else:
+                        logger.error("configuration migration could not be persisted")
                 return self._config
             except ConfigFileNotFoundError:
                 if self.auto_create:
@@ -523,6 +568,42 @@ class Config:
             )
         return False
 
+    @staticmethod
+    def _migrate_llm_provider_entries(config_data: Dict[str, Any]) -> bool:
+        """Migrate every llm_providers entry to the typed profile schema."""
+        providers = config_data.get("llm_providers")
+        if not isinstance(providers, list):
+            return False
+        changed = False
+        for provider in providers:
+            if not isinstance(provider, dict):
+                continue
+            migrated, entry_changed = migrate_llm_config({"llm": provider})
+            if entry_changed:
+                provider.update(migrated["llm"])
+                changed = True
+        return changed
+
+    @staticmethod
+    def _llm_field_dict(data: Dict[str, Any]) -> Dict[str, str]:
+        """Normalize one provider mapping into the full typed field set."""
+        return {
+            "provider": str(data.get("provider") or ""),
+            "model_name": str(data.get("model_name") or ""),
+            "api_key": str(data.get("api_key") or ""),
+            "api_base": str(data.get("api_base") or ""),
+            "endpoint_trust_mode": str(
+                data.get("endpoint_trust_mode") or "default"
+            ),
+            "tool_policy": str(data.get("tool_policy") or "enabled"),
+            "capability_confirmation": str(
+                data.get("capability_confirmation") or ""
+            ),
+            "tool_trust_confirmation": str(
+                data.get("tool_trust_confirmation") or ""
+            ),
+        }
+
     @contextmanager
     def atomic_update(self):
         """原子性更新配置的上下文管理器"""
@@ -592,20 +673,25 @@ def resolve_active_llm_config(config_data: Dict[str, Any]) -> Dict[str, str]:
             providers[0],
         )
         if isinstance(selected, dict):
-            return {
-                "model_name": str(selected.get("model_name", "")),
-                "api_key": str(selected.get("api_key", "")),
-                "api_base": str(selected.get("api_base", "")),
-            }
+            return Config._llm_field_dict(selected)
     legacy = config_data.get("llm", {})
-    return {
-        "model_name": str(legacy.get("model_name", "")),
-        "api_key": str(legacy.get("api_key", "")),
-        "api_base": str(legacy.get("api_base", "")),
-    }
+    return Config._llm_field_dict(legacy)
 
 
 def get_active_llm_config() -> Dict[str, str]:
     """Return the currently selected LLM provider configuration."""
     with config._lock:
         return resolve_active_llm_config(config._config or config_base)
+
+
+def get_active_llm_profile(
+    *,
+    require_confirmation: bool = True,
+    require_api_key: bool = True,
+):
+    """Return an immutable, fully validated snapshot for one runtime owner."""
+    return build_llm_profile(
+        resolve_active_llm_config(config._config or config_base),
+        require_confirmation=require_confirmation,
+        require_api_key=require_api_key,
+    )

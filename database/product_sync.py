@@ -5,19 +5,19 @@
 从拼多多API拉取商品列表，调用多模态LLM分析提取产品知识存入知识库。
 """
 import asyncio
-import inspect
 import threading
 from typing import Optional, Callable, List, Dict, Any
 from dataclasses import dataclass
 import json
 import time
 
-from openai import AsyncOpenAI
-from config import get_config
+from config import get_active_llm_profile
 
 from Channel.pinduoduo.utils.API.product_manager import ProductManager
 from database.knowledge_service import KnowledgeService
 from utils.logger_loguru import get_logger
+from utils.llm_provider import LLMProfile, ProfileValidationError
+from utils.llm_transport import async_completion
 
 logger = get_logger("ProductSync")
 
@@ -67,6 +67,17 @@ class ProductSyncService:
         """重置取消事件"""
         self._cancellation_event.clear()
 
+    def _snapshot_llm_profile(self) -> Optional[LLMProfile]:
+        """Capture one validated profile for a synchronization run."""
+        try:
+            return get_active_llm_profile(require_confirmation=False)
+        except ProfileValidationError as exc:
+            logger.warning(
+                "LLM profile unavailable for product sync; "
+                f"error_code={exc.code}"
+            )
+            return None
+
     async def sync_shop(
         self,
         shop_id: int,
@@ -92,6 +103,7 @@ class ProductSyncService:
             最终同步进度
         """
         self._reset_cancellation()
+        llm_profile = self._snapshot_llm_profile()
         pm = ProductManager(shop_id=str(shop_id), user_id=user_id)
 
         # ================== 第一阶段：快速抓取商品列表 ==================
@@ -277,7 +289,11 @@ class ProductSyncService:
                 product_info = detail["product_info"]
 
                 # 调用LLM提取知识
-                extracted = await self._extract_product_knowledge(product, product_info)
+                extracted = await self._extract_product_knowledge(
+                    product,
+                    product_info,
+                    profile=llm_profile,
+                )
 
                 # 立即更新到数据库（仅更新提取内容）
                 await asyncio.to_thread(
@@ -327,6 +343,7 @@ class ProductSyncService:
         self,
         list_product: Dict[str, Any],
         detail_product: Dict[str, Any],
+        profile: Optional[LLMProfile] = None,
     ) -> str:
         """
         调用LLM提取产品知识
@@ -338,24 +355,11 @@ class ProductSyncService:
         Returns:
             LLM提取的产品知识文本
         """
-        # 读取LLM配置
-        from config import get_active_llm_config
-
-        llm_config = get_active_llm_config()
-        model_name = llm_config.get("model_name") or "gpt-4o"
-        api_key = llm_config.get("api_key", "")
-        api_base = llm_config.get("api_base") or None
-
-        if not api_key:
-            logger.warning("LLM API key not configured, returning basic info only")
+        # 读取LLM配置（快照一次，同步过程不再重复解析）
+        profile = profile or self._snapshot_llm_profile()
+        if profile is None:
+            logger.warning("LLM profile unavailable, returning basic info only")
             return self._format_basic_info(list_product, detail_product)
-
-        # 创建客户端
-        client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=api_base,
-            timeout=120.0,
-        )
 
         # 构建prompt
         thumb_url = list_product.get("thumb_url", "")
@@ -410,20 +414,15 @@ class ProductSyncService:
         ]
 
         try:
-            try:
-                response = await client.chat.completions.create(
-                    model=model_name,
-                    messages=messages,
-                    temperature=0.3,
-                    response_format={"type": "json_object"},
-                )
-            finally:
-                close = getattr(client, "close", None) or getattr(client, "aclose", None)
-                if close is not None:
-                    close_result = close()
-                    if inspect.isawaitable(close_result):
-                        await close_result
-            content = response.choices[0].message.content.strip()
+            response = await async_completion(
+                profile,
+                messages,
+                temperature=0.3,
+                use_tools=False,
+                response_format={"type": "json_object"},
+                timeout=120.0,
+            )
+            content = str(response.content or "").strip()
             logger.debug(f"LLM输出长度={len(content)}")
 
             # 尝试解析JSON

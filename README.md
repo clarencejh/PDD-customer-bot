@@ -55,15 +55,19 @@ python app.py
 
 ## 配置
 
-首次运行后会在项目根目录生成 `config.json` 配置文件，主要配置项：
+首次运行后会生成 `config.json`。推荐在“系统设置 → LLM 模型配置”中填写 API Key；示例、日志和 CI 都不需要环境变量，也不包含真实密钥。
 
-| 配置项 | 说明 |
-| --- | --- |
-| `llm` | LLM 模型配置（模型名称、API 地址、密钥） |
-| `embedder` | 向量嵌入模型配置 |
-| `knowledge_base` | 知识库存储路径 |
-| `business_hours` | 人工客服工作时间（8:00-23:00） |
-| `prompt` | AI 客服提示词配置 |
+应用通过 LiteLLM 直接调用 Chat Completions，不需要单独启动 LiteLLM Proxy。设置页支持六个供应商：DeepSeek、火山引擎、OpenAI-compatible、Kimi/Moonshot、智谱/Z.AI、Qwen/DashScope，均通过 LiteLLM 路由前缀（`deepseek/`、`volcengine/`、`openai/`、`moonshot/`、`zai/`、`dashscope/`）直接调用，可使用默认 Base URL 或填写 HTTPS 覆盖。OpenAI-compatible 必须填写符合 Chat Completions 约定的 HTTPS Base URL，模型名可任意填写；其他供应商可留空使用默认端点。
+
+每个供应商都需要手动填写模型标识和 API Key。OpenAI-compatible 不会套用内置供应商的模型命名规则；例如可以填写组织内部模型名和其 HTTPS 端点。
+
+端点安全规则：远程端点必须使用 HTTPS 并保持证书校验；带账号密码的 URL、云实例元数据/链路本地地址和跨主机重定向会被拒绝。本地或私有端点（如本机或局域网内的 Ollama、LM Studio，可使用 HTTP）只有在设置页明确选择“允许本地或私有端点”后才可使用。使用自定义端点或能力未知的模型调用工具时，设置页会显示未验证状态并要求基于当前供应商、模型、端点和工具策略确认；明确不支持工具调用的模型不能启用，应用不会静默关闭工具。
+
+旧版本没有 `llm.provider` 的配置会在加载时迁移：历史 Ark/火山引擎端点迁移为 `volcengine`，其他无法识别的自定义端点迁移为 `openai_compatible`，模型名、端点和 API Key 保持不变。API Key 仍使用 Windows DPAPI 保护后落盘。
+
+保存成功只更新新的 profile。已经运行的账号继续使用自己的 profile 快照，需要按现有账号停止/重新启动流程后才会使用新配置。
+
+产品知识同步会把必要的商品文本和图片发送给所选供应商。供应商侧的数据保留、训练、跨境传输和隐私政策由用户与供应商自行确认；应用不会声称可以控制供应商的留存策略，也不会发送 API Key、Cookie、授权头或内部 profile 字段。
 
 ## 开发规范
 
@@ -135,7 +139,7 @@ Agent-Customer/
 | 类别 | 技术 |
 |------|------|
 | UI 框架 | PyQt6 + pyqt6-fluent-widgets |
-| AI 框架 | 自研 Agent 框架 + OpenAI 兼容 API |
+| AI 框架 | 自研 Agent 框架 + LiteLLM 直接异步调用 |
 | 数据库 | SQLAlchemy + SQLite |
 | 中文分词 | jieba（知识库检索） |
 | Token 统计 | tiktoken |

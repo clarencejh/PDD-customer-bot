@@ -37,6 +37,11 @@ from config import (
     LLMConfig,
     resolve_active_llm_config,
 )
+from utils.llm_provider import (
+    EndpointTrustMode,
+    LLMProfile,
+    LLMProvider,
+)
 from service.account_service import AccountService
 from Agent.CustomerAgent.custom.llm_client import LLMClient
 from ui.logo_loader import normalize_logo_url
@@ -289,7 +294,16 @@ class ConfigRegressionTests(unittest.TestCase):
 
 class LLMProviderTaskRegressionTests(unittest.IsolatedAsyncioTestCase):
     async def test_model_list_is_deduplicated_and_sorted(self):
-        client = LLMClient("key", "https://example.com/v1", "model", 0)
+        profile = LLMProfile(
+            provider=LLMProvider.OPENAI_COMPATIBLE,
+            model_name="model",
+            api_key="key",
+            api_base="https://example.com/v1",
+            endpoint_trust_mode=EndpointTrustMode.EXPLICIT,
+        )
+        client = LLMClient(profile=profile, temperature=0)
+        await client.initialize()
+
         fake_client = SimpleNamespace(
             models=SimpleNamespace(
                 list=mock.AsyncMock(
@@ -304,15 +318,18 @@ class LLMProviderTaskRegressionTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
         )
-        client._client = fake_client
-        self.assertEqual(await client.list_models(), ["A-model", "z-model"])
+        with mock.patch(
+            "openai.AsyncOpenAI",
+            return_value=fake_client,
+        ):
+            self.assertEqual(await client.list_models(), ["A-model", "z-model"])
 
     async def test_batch_provider_test_isolates_failures(self):
         from ui.setting_ui import LLMBatchTestThread
 
         class FakeClient:
-            def __init__(self, api_key, **kwargs):
-                self.api_key = api_key
+            def __init__(self, profile=None, **kwargs):
+                self.api_key = profile.api_key if profile else None
 
             async def initialize(self):
                 return None
@@ -351,7 +368,7 @@ class AutoReplyLLMGuardRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         for config_data, expected in (
             ({"api_key": "", "api_base": "https://example.com/v1", "model_name": "m"}, "API Key"),
-            ({"api_key": "key", "api_base": "", "model_name": "m"}, "API Base URL"),
+            ({"api_key": "key", "api_base": "", "model_name": "m"}, "Base URL"),
             ({"api_key": "key", "api_base": "https://example.com/v1", "model_name": ""}, "模型名称"),
         ):
             with self.subTest(config_data=config_data):

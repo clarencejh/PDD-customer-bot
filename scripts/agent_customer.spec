@@ -30,7 +30,7 @@ from core.app_version import APP_VERSION as PROJECT_VERSION
 # ================================
 # collect_all 收集 playwright/driver/ 下的 node 与 JS，否则打包后启动浏览器会
 # 因驱动缺失而失败。配合 pdd_login 的 channel="chrome"，用户无需安装 Playwright 浏览器。
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 _pw_datas, _pw_binaries, _pw_hidden = collect_all("playwright")
 
 # node.exe 不会进入 binaries，但会出现在 datas（目标 playwright/driver），这里显式补进 binaries
@@ -39,6 +39,25 @@ _pw_node = [
     (src, dst) for src, dst in _pw_datas if src.lower().endswith("node.exe")
 ]
 _pw_binaries = list(_pw_binaries) + _pw_node
+
+# LiteLLM 传输层依赖大量按前缀/供应商路由的子模块，动态导入不会被 PyInstaller
+# 自动发现，这里按供应商收集隐藏模块，避免打包后 LLM 请求在运行时失败。
+_llm_hidden = [
+    "litellm",
+    "litellm.main",
+    "litellm.llms",
+]
+for _provider_package in (
+    "litellm.llms.openai",
+    "litellm.llms.deepseek",
+    "litellm.llms.volcengine",
+    "litellm.llms.moonshot",
+    "litellm.llms.zai",
+    "litellm.llms.openai_like",
+    "litellm.llms.dashscope",
+    "litellm.llms.custom_httpx",
+):
+    _llm_hidden.extend(collect_submodules(_provider_package))
 
 # ================================
 # 基础配置
@@ -68,6 +87,14 @@ a = Analysis(
         "openai",
         "openai._models",
         "openai._client",
+        "litellm",
+        "litellm.main",
+        "litellm.litellm_core_utils",
+        "litellm.llms.openai",
+        "litellm.llms.deepseek",
+        "litellm.llms.volcengine",
+        "litellm.llms.moonshot",
+        "litellm.llms.zai",
         "tiktoken",
         "tiktoken_ext",
         "tiktoken_ext.openai_public",
@@ -192,7 +219,7 @@ a = Analysis(
         # === httpx (for openai) ===
         "httpx",
         "httpcore",
-    ] + _pw_hidden,
+    ] + _pw_hidden + _llm_hidden,
     hookspath=[],
     hooksconfig={},
     keys=block_cipher,
