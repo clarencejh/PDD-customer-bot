@@ -134,6 +134,8 @@ class ConversationRecord(Base):
     __tablename__ = "conversation_records"
     __table_args__ = (
         Index("ix_conversation_records_scope_time", "shop_id", "account_user_id", "customer_uid", "created_at"),
+        Index("ix_conversation_records_thread_time", "channel_name", "shop_id", "customer_uid", "created_at"),
+        Index("ix_conversation_records_message_type", "message_type"),
         Index("ix_conversation_records_platform_message", "platform_message_id"),
         UniqueConstraint(
             "channel_name", "shop_id", "account_user_id",

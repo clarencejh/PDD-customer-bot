@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ipaddress
 import inspect
+import re
 import socket
 from dataclasses import dataclass
 from enum import Enum
@@ -66,12 +67,17 @@ class LLMTransportError(RuntimeError):
         *,
         provider: str,
         model_name: str,
+        detail: str = "",
     ) -> None:
         super().__init__(safe_message)
         self.category = category
         self.safe_message = safe_message
         self.provider = provider
         self.model_name = model_name
+        # Redacted provider/runtime text for operator-facing surfaces only.
+        # ``str()`` and ``safe_message`` stay free of it so customer-facing
+        # paths cannot echo a provider payload.
+        self.detail = detail
 
 
 @dataclass(frozen=True)
@@ -358,6 +364,33 @@ def safe_error_message(category: LLMErrorCategory) -> str:
     }[category]
 
 
+# Token shapes providers echo back inside their own error payloads.  Stripping
+# the configured key is the real defence; this is a narrow backstop for a key
+# that arrives reshaped, kept long enough not to swallow plain error codes.
+_SECRET_PATTERN = re.compile(r"(?i)\b(?:sk|xai|gsk)[-_][A-Za-z0-9\-_]{16,}")
+_BEARER_PATTERN = re.compile(r"(?i)(authorization|bearer)\s*[:=]?\s*\S+")
+_DETAIL_LIMIT = 400
+
+
+def error_detail(exc: BaseException, *secrets: Optional[str]) -> str:
+    """Redacted one-line description of a failure, for operator surfaces.
+
+    The provider's own text is the only thing that distinguishes "model does
+    not exist" from "insufficient balance", so it is worth showing — but it can
+    echo the credential that was sent, so every known secret is stripped first.
+    """
+    text = " ".join(str(exc).split())
+    for secret in secrets:
+        if secret and len(secret) >= 6:
+            text = text.replace(secret, "***")
+    text = _BEARER_PATTERN.sub(r"\1 ***", text)
+    text = _SECRET_PATTERN.sub("***", text)
+    if len(text) > _DETAIL_LIMIT:
+        text = f"{text[:_DETAIL_LIMIT]}…"
+    name = type(exc).__name__
+    return f"{name}: {text}" if text else name
+
+
 def _build_redirect_safe_client(profile: LLMProfile, timeout: Optional[float]) -> Any:
     """Create a per-request LiteLLM client that never follows redirects.
 
@@ -424,11 +457,30 @@ async def async_completion(
         max_tokens=max_tokens,
         timeout=timeout,
     )
-    sdk = _load_litellm()
-    transport_client = _build_redirect_safe_client(
-        build_llm_profile(profile, require_confirmation=False),
-        timeout,
-    )
+    try:
+        sdk = _load_litellm()
+        transport_client = _build_redirect_safe_client(
+            build_llm_profile(profile, require_confirmation=False),
+            timeout,
+        )
+    except (EndpointPolicyError, ProfileValidationError):
+        raise
+    except Exception as exc:
+        # Importing LiteLLM or building its HTTP client is local runtime work,
+        # not a provider response.  It used to escape the handler below and
+        # reach the UI as a bare class name (a frozen build missing LiteLLM's
+        # bundled JSON surfaced only as "FileNotFoundError").
+        logger.error(
+            "LLM transport setup failed; "
+            f"error_type={type(exc).__name__} provider={profile.provider.value}"
+        )
+        raise LLMTransportError(
+            LLMErrorCategory.GENERIC,
+            "本地 LLM 传输层初始化失败，请检查运行环境依赖是否完整",
+            provider=profile.provider.value,
+            model_name=profile.model_name,
+            detail=error_detail(exc, profile.api_key),
+        ) from None
     payload["client"] = transport_client
     try:
         response = sdk.acompletion(**payload)
@@ -447,6 +499,7 @@ async def async_completion(
             safe_error_message(category),
             provider=profile.provider.value,
             model_name=profile.model_name,
+            detail=error_detail(exc, profile.api_key),
         ) from None
     finally:
         await _close_transport_client(transport_client)
@@ -464,6 +517,7 @@ __all__ = [
     "async_completion",
     "build_chat_payload",
     "classify_exception",
+    "error_detail",
     "litellm",
     "normalize_response",
     "safe_error_message",

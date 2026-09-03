@@ -30,7 +30,7 @@ from core.app_version import APP_VERSION as PROJECT_VERSION
 # ================================
 # collect_all 收集 playwright/driver/ 下的 node 与 JS，否则打包后启动浏览器会
 # 因驱动缺失而失败。配合 pdd_login 的 channel="chrome"，用户无需安装 Playwright 浏览器。
-from PyInstaller.utils.hooks import collect_all, collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
 _pw_datas, _pw_binaries, _pw_hidden = collect_all("playwright")
 
 # node.exe 不会进入 binaries，但会出现在 datas（目标 playwright/driver），这里显式补进 binaries
@@ -59,6 +59,11 @@ for _provider_package in (
 ):
     _llm_hidden.extend(collect_submodules(_provider_package))
 
+# LiteLLM 在 `import litellm` 时就会读取包内的 model_prices_and_context_window_backup.json
+# 和 tokenizers/ 数据文件。PyInstaller 没有 litellm 的官方 hook，hiddenimports 只收 .py，
+# 不收这些 .json——缺失时打包版一启动模型测试就抛 FileNotFoundError。
+_llm_datas = collect_data_files("litellm")
+
 # ================================
 # 基础配置
 # ================================
@@ -70,7 +75,7 @@ a = Analysis(
         # 图标文件
         (str(PROJECT_ROOT / "icon" / "icon.ico"), "icon"),
         (str(PROJECT_ROOT / "icon" / "Customer-Agent-qr.png"), "icon"),
-    ] + _pw_datas,
+    ] + _pw_datas + _llm_datas,
     hiddenimports=[
         # === PyQt6 & Fluent Widgets ===
         "PyQt6",

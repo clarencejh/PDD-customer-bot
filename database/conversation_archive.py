@@ -369,7 +369,7 @@ class ConversationArchiveService:
     def list_conversations(
         self, *, shop_id: Optional[str] = None,
         account_user_id: Optional[str] = None, search: Optional[str] = None,
-        limit: int = 200,
+        limit: int = 100, offset: int = 0,
     ) -> List[Dict[str, Any]]:
         """Return the latest record for each customer conversation."""
         partition = (
@@ -444,7 +444,8 @@ class ConversationArchiveService:
         final_statement = (
             select(ranked)
             .where(ranked.c.record_rank == 1)
-            .order_by(ranked.c.created_at.desc())
+            .order_by(ranked.c.created_at.desc(), ranked.c.conversation_id.desc())
+            .offset(max(0, offset))
             .limit(max(1, min(limit, 500)))
         )
         session = self.db_manager.get_session()
@@ -458,6 +459,58 @@ class ConversationArchiveService:
                     item["created_at"] = item["created_at"].isoformat()
                 conversations.append(item)
             return conversations
+        finally:
+            session.close()
+
+    def latest_record_id(self) -> int:
+        """Cheap archive revision probe for pollers, served by the primary key."""
+        session = self.db_manager.get_session()
+        try:
+            return int(
+                session.execute(
+                    select(func.max(ConversationRecord.id))
+                ).scalar() or 0
+            )
+        finally:
+            session.close()
+
+    def count_conversations(
+        self, *, shop_id: Optional[str] = None,
+        account_user_id: Optional[str] = None, search: Optional[str] = None,
+    ) -> int:
+        """Count customer-grouped conversations without loading their records."""
+        statement = select(
+            ConversationRecord.channel_name,
+            ConversationRecord.shop_id,
+            ConversationRecord.customer_uid,
+        ).where(
+            ConversationRecord.customer_uid.notin_(("", "unknown", "4"))
+        )
+        if shop_id:
+            statement = statement.where(
+                ConversationRecord.shop_id == str(shop_id)
+            )
+        if account_user_id:
+            statement = statement.where(
+                ConversationRecord.account_user_id == str(account_user_id)
+            )
+        search_text = str(search or "").strip()
+        if search_text:
+            pattern = f"%{search_text}%"
+            statement = statement.where(
+                or_(
+                    ConversationRecord.customer_uid.like(pattern),
+                    ConversationRecord.customer_nickname.like(pattern),
+                )
+            )
+
+        session = self.db_manager.get_session()
+        try:
+            return int(
+                session.execute(
+                    select(func.count()).select_from(statement.distinct().subquery())
+                ).scalar_one()
+            )
         finally:
             session.close()
 

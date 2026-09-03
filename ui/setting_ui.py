@@ -30,7 +30,7 @@ from utils.llm_provider import (
     requires_tool_trust_confirmation,
 )
 from Agent.CustomerAgent.custom.llm_client import LLMClient
-from service.llm_service import llm_error_message
+from service.llm_service import llm_error_message, split_error_message
 from service.data_maintenance_service import data_maintenance_service
 from service.startup_service import startup_service
 from service.system_notification_service import get_system_notifier
@@ -38,6 +38,18 @@ from service.system_notification_service import get_system_notifier
 
 def _llm_error_message(exc: Exception) -> str:
     return llm_error_message(exc)
+
+
+def _show_error_dialog(parent, title: str, message: str, icon=None) -> None:
+    """Show an operator error with the concrete cause behind 「显示详细信息」."""
+    hint, detail = split_error_message(message)
+    box = QMessageBox(parent)
+    box.setWindowTitle(title)
+    box.setIcon(icon or QMessageBox.Icon.Warning)
+    box.setText(hint or message)
+    if detail:
+        box.setDetailedText(detail)
+    box.exec()
 
 
 class LLMConnectionTestThread(QThread):
@@ -1518,7 +1530,7 @@ class SettingUI(QFrame):
                 parent=self,
             )
         else:
-            QMessageBox.warning(self, "连接失败", message)
+            _show_error_dialog(self, "连接失败", message)
 
     def onBatchTestConnections(self):
         if self.batch_test_thread and self.batch_test_thread.isRunning():
@@ -1556,11 +1568,32 @@ class SettingUI(QFrame):
             self.llm_config_card.setProviderStatus(provider_id, success, message)
         success_count = sum(1 for success, _ in results.values() if success)
         failure_count = len(results) - success_count
-        QMessageBox.information(
-            self,
-            "批量测试完成",
-            f"测试完成：{success_count} 个通过，{failure_count} 个失败。",
+
+        providers, _ = self.llm_config_card.getProviders()
+        names = {
+            provider["id"]: provider.get("name") or provider["id"]
+            for provider in providers
+        }
+        failures = [
+            f"{names.get(provider_id, provider_id)}：{message}"
+            for provider_id, (success, message) in results.items()
+            if not success
+        ]
+        box = QMessageBox(self)
+        box.setWindowTitle("批量测试完成")
+        box.setIcon(
+            QMessageBox.Icon.Warning if failures else QMessageBox.Icon.Information
         )
+        box.setText(f"测试完成：{success_count} 个通过，{failure_count} 个失败。")
+        if failures:
+            # A count alone leaves the operator guessing which provider broke.
+            box.setInformativeText("失败：" + "、".join(
+                names.get(provider_id, provider_id)
+                for provider_id, (success, _) in results.items()
+                if not success
+            ))
+            box.setDetailedText("\n\n".join(failures))
+        box.exec()
 
     def onFetchModels(self):
         if self.model_fetch_thread and self.model_fetch_thread.isRunning():
@@ -1607,7 +1640,7 @@ class SettingUI(QFrame):
                 parent=self,
             )
         else:
-            QMessageBox.warning(self, "拉取失败", message)
+            _show_error_dialog(self, "拉取失败", message)
         self._task_provider_id = None
 
     def onResetConfig(self):

@@ -90,19 +90,12 @@ def _parse_time(value: Any) -> Optional[datetime]:
 
 def _list_time(value: Any) -> str:
     parsed = _parse_time(value)
-    if not parsed:
-        return ""
-    today = datetime.now().date()
-    if parsed.date() == today:
-        return parsed.strftime("%H:%M")
-    if parsed.year == today.year:
-        return parsed.strftime("%m-%d")
-    return parsed.strftime("%Y-%m-%d")
+    return parsed.strftime("%Y-%m-%d %H:%M:%S") if parsed else ""
 
 
 def _message_time(value: Any) -> str:
     parsed = _parse_time(value)
-    return parsed.strftime("%H:%M") if parsed else ""
+    return parsed.strftime("%Y-%m-%d %H:%M:%S") if parsed else ""
 
 
 def _message_date(value: Any) -> str:
@@ -336,6 +329,9 @@ class ConversationActionThread(QThread):
 
 
 class ConversationUI(QFrame):
+    CONVERSATIONS_PER_PAGE = 100
+    MESSAGES_PER_PAGE = 100
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("conversationArchive")
@@ -343,6 +339,12 @@ class ConversationUI(QFrame):
         self._accounts = []
         self._conversations: Dict[str, Dict[str, Any]] = {}
         self._conversation_signature = None
+        self._conversation_page = 0
+        self._conversation_total = 0
+        self._archive_revision: Optional[int] = None
+        self._message_page = 0
+        self._message_page_total = 1
+        self._active_thread_key: Optional[str] = None
         self._active_conversation: Optional[Dict[str, Any]] = None
         self._action_workers = set()
         self._action_in_progress = False
@@ -352,7 +354,7 @@ class ConversationUI(QFrame):
         self._setup_ui()
         self._load_accounts()
         self._ready = True
-        self.refresh(force=True)
+        self._reload_from_source()
         self.refresh_timer = QTimer(self)
         self.refresh_timer.setInterval(1500)
         self.refresh_timer.timeout.connect(self._refresh_if_visible)
@@ -425,6 +427,22 @@ class ConversationUI(QFrame):
         )
         left_layout.addWidget(self.list_empty_label)
         left_layout.addWidget(self.conversation_list, 1)
+
+        conversation_pagination = QHBoxLayout()
+        conversation_pagination.setContentsMargins(2, 6, 2, 2)
+        conversation_pagination.setSpacing(4)
+        self.conversation_previous_button = PushButton("", self, FIF.LEFT_ARROW)
+        self.conversation_next_button = PushButton("", self, FIF.RIGHT_ARROW)
+        self.conversation_previous_button.setToolTip("上一页")
+        self.conversation_next_button.setToolTip("下一页")
+        self.conversation_previous_button.setFixedSize(32, 28)
+        self.conversation_next_button.setFixedSize(32, 28)
+        self.conversation_page_label = CaptionLabel("")
+        self.conversation_page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        conversation_pagination.addWidget(self.conversation_previous_button)
+        conversation_pagination.addWidget(self.conversation_page_label, 1)
+        conversation_pagination.addWidget(self.conversation_next_button)
+        left_layout.addLayout(conversation_pagination)
         splitter.addWidget(left_panel)
 
         self.detail_stack = QStackedWidget()
@@ -485,6 +503,24 @@ class ConversationUI(QFrame):
         self.messages_scroll.setWidget(self.messages_canvas)
         chat_layout.addWidget(self.messages_scroll, 1)
 
+        message_pagination = QHBoxLayout()
+        message_pagination.setContentsMargins(14, 5, 14, 5)
+        message_pagination.setSpacing(6)
+        self.message_previous_button = PushButton("", self, FIF.LEFT_ARROW)
+        self.message_next_button = PushButton("", self, FIF.RIGHT_ARROW)
+        self.message_previous_button.setToolTip("上一页消息")
+        self.message_next_button.setToolTip("下一页消息")
+        self.message_previous_button.setFixedSize(32, 28)
+        self.message_next_button.setFixedSize(32, 28)
+        self.message_page_label = CaptionLabel("")
+        self.message_page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        message_pagination.addStretch(1)
+        message_pagination.addWidget(self.message_previous_button)
+        message_pagination.addWidget(self.message_page_label)
+        message_pagination.addWidget(self.message_next_button)
+        message_pagination.addStretch(1)
+        chat_layout.addLayout(message_pagination)
+
         composer = QFrame()
         composer.setObjectName("conversationComposer")
         composer.setStyleSheet(
@@ -523,10 +559,14 @@ class ConversationUI(QFrame):
         self.shop_combo.currentIndexChanged.connect(self._on_shop_changed)
         self.account_combo.currentIndexChanged.connect(self._filters_changed)
         self.customer_input.returnPressed.connect(self.refresh)
-        refresh_button.clicked.connect(lambda: self.refresh(force=True))
+        refresh_button.clicked.connect(self._reload_from_source)
+        self.conversation_previous_button.clicked.connect(self._previous_conversation_page)
+        self.conversation_next_button.clicked.connect(self._next_conversation_page)
         self.conversation_list.currentItemChanged.connect(
             self._on_conversation_selected
         )
+        self.message_previous_button.clicked.connect(self._previous_message_page)
+        self.message_next_button.clicked.connect(self._next_message_page)
         self.reply_input.send_requested.connect(self._send_reply)
         self.send_button.clicked.connect(self._send_reply)
         self.transfer_button.clicked.connect(self._choose_transfer_target)
@@ -566,38 +606,70 @@ class ConversationUI(QFrame):
     def _on_shop_changed(self):
         self._populate_accounts()
         if self._ready:
+            self._conversation_page = 0
             self.refresh(force=True)
 
     def _filters_changed(self):
         if self._ready:
+            self._conversation_page = 0
             self.refresh(force=True)
 
     def _refresh_if_visible(self):
         if self.isVisible():
             self.refresh()
 
-    def refresh(self, force=False):
+    def _reload_from_source(self):
+        """Manual reload: repair legacy rows once, then rebuild the view."""
         self.archive.reconcile_system_records()
+        self.refresh(force=True)
+
+    def refresh(self, force=False):
+        revision = self.archive.latest_record_id()
+        if not force and revision == self._archive_revision:
+            return
+        self._archive_revision = revision
         selected_id = None
         current = self.conversation_list.currentItem()
         if current:
             selected_id = current.data(Qt.ItemDataRole.UserRole)
 
-        conversations = self.archive.list_conversations(
-            shop_id=self.shop_combo.currentData(),
-            account_user_id=self.account_combo.currentData(),
-            search=self.customer_input.text().strip() or None,
-            limit=300,
+        filters = {
+            "shop_id": self.shop_combo.currentData(),
+            "account_user_id": self.account_combo.currentData(),
+            "search": self.customer_input.text().strip() or None,
+        }
+        conversation_total = self.archive.count_conversations(**filters)
+        total_pages = max(
+            1,
+            (conversation_total + self.CONVERSATIONS_PER_PAGE - 1)
+            // self.CONVERSATIONS_PER_PAGE,
         )
-        signature = tuple(
-            (
-                _thread_key(item),
-                item.get("created_at"),
-                item.get("message_count"),
-                item.get("content"),
-                item.get("event_type"),
-            )
-            for item in conversations
+        if self._conversation_page >= total_pages:
+            self._conversation_page = total_pages - 1
+        conversations = self.archive.list_conversations(
+            **filters,
+            limit=self.CONVERSATIONS_PER_PAGE,
+            offset=self._conversation_page * self.CONVERSATIONS_PER_PAGE,
+        )
+        self._conversation_total = conversation_total
+        self.conversation_page_label.setText(
+            f"第 {self._conversation_page + 1}/{total_pages} 页"
+        )
+        self.conversation_previous_button.setEnabled(self._conversation_page > 0)
+        self.conversation_next_button.setEnabled(self._conversation_page + 1 < total_pages)
+        signature = (
+            conversation_total,
+            self._conversation_page,
+            tuple(
+                (
+                    _thread_key(item),
+                    item.get("created_at"),
+                    item.get("message_count"),
+                    item.get("content"),
+                    item.get("event_type"),
+                )
+                for item in conversations
+            ),
         )
         if not force and signature == self._conversation_signature:
             return
@@ -622,13 +694,60 @@ class ConversationUI(QFrame):
         has_conversations = bool(conversations)
         self.list_empty_label.setVisible(not has_conversations)
         self.conversation_list.setVisible(has_conversations)
-        self.summary_label.setText(f"共 {len(conversations)} 个客户会话")
+        self.summary_label.setText(
+            f"共 {conversation_total} 个客户会话，每页 {self.CONVERSATIONS_PER_PAGE} 条"
+        )
         if has_conversations:
             self.conversation_list.setCurrentRow(
                 selected_row if selected_row >= 0 else 0
             )
         else:
             self.detail_stack.setCurrentIndex(0)
+
+    def _previous_conversation_page(self):
+        if self._conversation_page <= 0:
+            return
+        self._conversation_page -= 1
+        self.refresh(force=True)
+
+    def _next_conversation_page(self):
+        if (self._conversation_page + 1) * self.CONVERSATIONS_PER_PAGE >= self._conversation_total:
+            return
+        self._conversation_page += 1
+        self.refresh(force=True)
+
+    def _message_page_count(self, conversation: Dict[str, Any]) -> int:
+        total = int(conversation.get("message_count") or 0)
+        return max(1, (total + self.MESSAGES_PER_PAGE - 1) // self.MESSAGES_PER_PAGE)
+
+    def _previous_message_page(self):
+        if self._message_page <= 0 or not self._active_conversation:
+            return
+        self._message_page -= 1
+        self._load_active_messages()
+
+    def _next_message_page(self):
+        conversation = self._active_conversation
+        if not conversation:
+            return
+        if self._message_page + 1 >= self._message_page_count(conversation):
+            return
+        self._message_page += 1
+        self._load_active_messages()
+
+    def _load_active_messages(self):
+        conversation = self._active_conversation
+        if not conversation:
+            return
+        records = self.archive.list_records(
+            channel_name=conversation.get("channel_name"),
+            shop_id=conversation.get("shop_id"),
+            customer_uid=conversation.get("customer_uid"),
+            limit=self.MESSAGES_PER_PAGE,
+            offset=self._message_page * self.MESSAGES_PER_PAGE,
+            ascending=True,
+        )
+        self._render_conversation(conversation, records)
 
     def _on_conversation_selected(self, current, _previous):
         if current is None:
@@ -644,15 +763,19 @@ class ConversationUI(QFrame):
             self.detail_stack.setCurrentIndex(0)
             return
         self._active_conversation = conversation
+        pages = self._message_page_count(conversation)
+        if (
+            thread_key != self._active_thread_key
+            or self._message_page >= self._message_page_total - 1
+        ):
+            # A newly opened thread, or a reader sitting on the newest page,
+            # follows the end of the timeline; an older page stays put.
+            self._message_page = pages - 1
+        else:
+            self._message_page = min(self._message_page, pages - 1)
+        self._active_thread_key = thread_key
         self._set_composer_enabled(True)
-        records = self.archive.list_records(
-            channel_name=conversation.get("channel_name"),
-            shop_id=conversation.get("shop_id"),
-            customer_uid=conversation.get("customer_uid"),
-            limit=2000,
-            ascending=True,
-        )
-        self._render_conversation(conversation, records)
+        self._load_active_messages()
 
     def _render_conversation(self, conversation, records):
         customer = _identity_label(
@@ -666,8 +789,16 @@ class ConversationUI(QFrame):
             conversation.get("account_user_id"),
         )
         self.chat_title.setText(customer)
+        message_total = int(conversation.get("message_count") or 0)
+        message_pages = self._message_page_count(conversation)
+        self._message_page_total = message_pages
+        self.message_page_label.setText(
+            f"第 {self._message_page + 1}/{message_pages} 页（每页 {self.MESSAGES_PER_PAGE} 条）"
+        )
+        self.message_previous_button.setEnabled(self._message_page > 0)
+        self.message_next_button.setEnabled(self._message_page + 1 < message_pages)
         self.chat_scope.setText(
-            f"{shop}  |  最近客服账号 {account}  |  共 {len(records)} 条记录"
+            f"{shop}  |  最近客服账号 {account}  |  共 {message_total} 条记录"
         )
 
         while self.messages_layout.count():

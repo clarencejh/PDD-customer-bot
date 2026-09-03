@@ -34,6 +34,7 @@ from qfluentwidgets import (
 
 from config import config
 from service.account_service import account_service
+from service.llm_service import split_error_message
 from service.system_notification_service import notify_system
 from utils.logger_loguru import get_logger
 from .manager import auto_reply_manager
@@ -659,12 +660,22 @@ class OperationsUI(QFrame):
         self._reported_ai_failures.add(key)
         account["last_error"] = error
         self.refresh_runtime_state()
+        # A desktop toast gets truncated by the OS, so it carries the hint only;
+        # the dialog keeps the provider detail behind 「显示详细信息」.
+        hint, detail = split_error_message(error)
+        username = account.get("username", "")
         notify_system(
             "AI 服务已失效",
-            f"账号 {account.get('username', '')} 保持客服连接，但暂时无法自动回复：{error}",
+            f"账号 {username} 保持客服连接，但暂时无法自动回复：{hint}",
             "critical",
         )
-        QMessageBox.warning(self, "AI 服务已失效", f"账号 {account.get('username', '')} 保持客服连接，但暂时无法自动回复：{error}")
+        box = QMessageBox(self)
+        box.setWindowTitle("AI 服务已失效")
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText(f"账号 {username} 保持客服连接，但暂时无法自动回复：{hint}")
+        if detail:
+            box.setDetailedText(detail)
+        box.exec()
 
     def add_account(self):
         from ui.user_ui import AddAccountDialog, LoginThread

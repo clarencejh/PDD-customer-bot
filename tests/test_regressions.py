@@ -769,10 +769,10 @@ class VersionSystemRegressionTests(unittest.TestCase):
         )
         from scripts.build_win_exe import get_version
 
-        self.assertEqual(__version__, "1.4.0b2")
+        self.assertEqual(__version__, "1.4.0b3")
         self.assertEqual(APP_VERSION, __version__)
-        self.assertEqual(DISPLAY_VERSION, "v1.4.0 Beta 2")
-        self.assertEqual(RELEASE_TAG, "v1.4.0-beta.2")
+        self.assertEqual(DISPLAY_VERSION, "v1.4.0 Beta 3")
+        self.assertEqual(RELEASE_TAG, "v1.4.0-beta.3")
         self.assertTrue(IS_PRERELEASE)
         self.assertEqual(get_version(), APP_VERSION)
 
@@ -1136,6 +1136,66 @@ class StorageRegressionTests(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertEqual(archive_event.call_args.kwargs["event_type"], "transfer_to_ai")
         self.assertEqual(archive_event.call_args.kwargs["status"], "sent")
+
+    def test_conversation_list_pages_without_loading_every_record(self):
+        with TemporaryDirectory() as directory:
+            manager = DatabaseManager(str(Path(directory) / "paging.db"))
+            try:
+                service = ConversationArchiveService(manager)
+                for customer in range(7):
+                    for index in range(30):
+                        service.archive_outbound(
+                            channel_name="pinduoduo", shop_id="shop-1",
+                            account_user_id="account-1",
+                            customer_uid=f"customer-{customer}",
+                            content=f"消息 {index}", message_type="text",
+                            sender_type="ai", status="sent",
+                            platform_message_id=f"msg-{customer}-{index}",
+                        )
+
+                self.assertEqual(service.count_conversations(), 7)
+                self.assertEqual(service.count_conversations(shop_id="shop-2"), 0)
+                self.assertEqual(
+                    service.count_conversations(search="customer-3"), 1
+                )
+
+                first_page = service.list_conversations(limit=5, offset=0)
+                second_page = service.list_conversations(limit=5, offset=5)
+                self.assertEqual(len(first_page), 5)
+                self.assertEqual(len(second_page), 2)
+                self.assertEqual(first_page[0]["message_count"], 30)
+                first_keys = {item["customer_uid"] for item in first_page}
+                self.assertTrue(
+                    first_keys.isdisjoint(
+                        {item["customer_uid"] for item in second_page}
+                    )
+                )
+
+                head = service.list_records(
+                    channel_name="pinduoduo", shop_id="shop-1",
+                    customer_uid="customer-0", limit=10, offset=0, ascending=True,
+                )
+                tail = service.list_records(
+                    channel_name="pinduoduo", shop_id="shop-1",
+                    customer_uid="customer-0", limit=10, offset=20, ascending=True,
+                )
+                self.assertEqual(len(head), 10)
+                self.assertEqual(len(tail), 10)
+                self.assertEqual(head[0]["content"], "消息 0")
+                self.assertEqual(tail[-1]["content"], "消息 29")
+
+                newest_id = service.latest_record_id()
+                self.assertEqual(service.latest_record_id(), newest_id)
+                service.archive_outbound(
+                    channel_name="pinduoduo", shop_id="shop-1",
+                    account_user_id="account-1", customer_uid="customer-0",
+                    content="新消息", message_type="text",
+                    sender_type="ai", status="sent",
+                    platform_message_id="msg-fresh",
+                )
+                self.assertGreater(service.latest_record_id(), newest_id)
+            finally:
+                manager.dispose()
 
     def test_conversation_archive_persists_timeline_and_is_idempotent(self):
         with TemporaryDirectory() as directory:

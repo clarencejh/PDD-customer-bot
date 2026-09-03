@@ -84,6 +84,25 @@ class DatabaseManager:
                 connection.exec_driver_sql(
                     "ALTER TABLE conversation_records ADD COLUMN shop_name VARCHAR(100)"
                 )
+            indexes = {
+                row[0]
+                for row in connection.exec_driver_sql(
+                    "SELECT name FROM sqlite_master WHERE type='index'"
+                )
+            }
+            # Archives created before conversation paging lack the indexes the
+            # browser relies on; CREATE INDEX is cheap next to a full scan.
+            for name, definition in (
+                (
+                    "ix_conversation_records_thread_time",
+                    "channel_name, shop_id, customer_uid, created_at",
+                ),
+                ("ix_conversation_records_message_type", "message_type"),
+            ):
+                if name not in indexes:
+                    connection.exec_driver_sql(
+                        f"CREATE INDEX {name} ON conversation_records ({definition})"
+                    )
 
 
     def get_session(self):

@@ -3,7 +3,7 @@
 import re
 
 
-__version__ = "1.4.0b2"
+__version__ = "1.4.0b3"
 APP_VERSION = __version__
 
 

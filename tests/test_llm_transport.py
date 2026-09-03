@@ -234,6 +234,60 @@ class ResponseAndErrorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(raised.exception.category, category)
             self.assertNotIn("secret-key", str(raised.exception))
             self.assertNotIn("secret-key", raised.exception.safe_message)
+            self.assertNotIn("secret-key", raised.exception.detail)
+
+    async def test_provider_detail_is_carried_but_redacted(self):
+        fake = _FakeLiteLLM(
+            error=ValueError(
+                "model 'gpt-9' does not exist (key sk-secret-key-1234, "
+                "Authorization: Bearer secret-key)"
+            )
+        )
+        with mock.patch.object(transport, "litellm", fake):
+            with self.assertRaises(transport.LLMTransportError) as raised:
+                await transport.async_completion(
+                    _profile(),
+                    [{"role": "user", "content": "hello"}],
+                    use_tools=False,
+                )
+        detail = raised.exception.detail
+        self.assertIn("does not exist", detail)
+        self.assertIn("gpt-9", detail)
+        self.assertNotIn("sk-secret-key-1234", detail)
+        self.assertNotIn("Bearer secret-key", detail)
+        # The safe surfaces stay generic so customer-facing paths cannot echo it.
+        self.assertNotIn("gpt-9", raised.exception.safe_message)
+        self.assertNotIn("gpt-9", str(raised.exception))
+
+    async def test_transport_setup_failure_reports_the_missing_dependency(self):
+        with mock.patch.object(
+            transport,
+            "_load_litellm",
+            side_effect=FileNotFoundError(
+                "[Errno 2] No such file or directory: "
+                "'litellm/model_prices_and_context_window_backup.json'"
+            ),
+        ):
+            with self.assertRaises(transport.LLMTransportError) as raised:
+                await transport.async_completion(
+                    _profile(),
+                    [{"role": "user", "content": "hello"}],
+                    use_tools=False,
+                )
+        self.assertEqual(raised.exception.category, transport.LLMErrorCategory.GENERIC)
+        self.assertIn("FileNotFoundError", raised.exception.detail)
+        self.assertIn(
+            "model_prices_and_context_window_backup.json", raised.exception.detail
+        )
+
+    def test_error_detail_redacts_the_configured_key(self):
+        detail = transport.error_detail(
+            RuntimeError("rejected token abcdef123456 for account"),
+            "abcdef123456",
+        )
+        self.assertIn("RuntimeError", detail)
+        self.assertIn("rejected token", detail)
+        self.assertNotIn("abcdef123456", detail)
 
 
 class EndpointPolicyTests(unittest.TestCase):

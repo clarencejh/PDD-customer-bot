@@ -10,14 +10,25 @@ from utils.llm_provider import (
     build_llm_profile,
     profile_to_dict,
 )
+from utils.llm_transport import error_detail
 
 
 class LLMServiceError(RuntimeError):
     """An LLM failure that must be shown to the operator, not the customer."""
 
 
+# Separator between the actionable hint and the concrete provider/runtime text.
+# Operator dialogs split on it to render the detail in a collapsible section.
+ERROR_DETAIL_SEPARATOR = "\n\n详细信息："
+
+
 def llm_error_message(exc: Exception) -> str:
-    """Convert provider exceptions into actionable operator-facing messages."""
+    """Convert provider exceptions into actionable operator-facing messages.
+
+    The hint says what to do; the appended detail says what actually went
+    wrong.  Without the detail every failure reads the same, so "model not
+    found", "insufficient balance" and "context too long" are indistinguishable.
+    """
     error_messages = {
         "AuthenticationError": "API Key 无效或已过期。",
         "PermissionDeniedError": "API Key 没有调用该模型的权限。",
@@ -29,15 +40,26 @@ def llm_error_message(exc: Exception) -> str:
     }
     if isinstance(exc, LLMServiceError) and str(exc):
         return str(exc)
-    # 新统一传输层产生的安全错误：优先使用不泄露密钥/原始错误的 safe_message。
+    # 新统一传输层产生的安全错误：safe_message 不含密钥/原始错误，
+    # detail 是已脱敏的供应商原文，运维界面需要它来定位问题。
     safe_message = getattr(exc, "safe_message", None)
     if isinstance(safe_message, str) and safe_message:
-        return safe_message
+        return _with_detail(safe_message, getattr(exc, "detail", ""))
     if isinstance(exc, (ProfileValidationError, ValueError, RuntimeError)) and str(exc):
         return str(exc)
-    if type(exc).__name__ in error_messages:
-        return error_messages[type(exc).__name__]
-    return f"AI 服务请求失败（{type(exc).__name__}）。"
+    hint = error_messages.get(type(exc).__name__, "AI 服务请求失败。")
+    return _with_detail(hint, error_detail(exc))
+
+
+def _with_detail(message: str, detail: str) -> str:
+    detail = str(detail or "").strip()
+    return f"{message}{ERROR_DETAIL_SEPARATOR}{detail}" if detail else message
+
+
+def split_error_message(message: str) -> tuple[str, str]:
+    """Split an operator message into (hint, detail) for dialog rendering."""
+    hint, separator, detail = str(message or "").partition(ERROR_DETAIL_SEPARATOR)
+    return hint, detail if separator else ""
 
 
 def validate_llm_config(llm_config: dict[str, Any] | None = None) -> dict[str, Any]:

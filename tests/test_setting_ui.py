@@ -3,8 +3,48 @@ import unittest
 
 from PyQt6.QtWidgets import QApplication
 
+from service.llm_service import (
+    ERROR_DETAIL_SEPARATOR,
+    LLMServiceError,
+    llm_error_message,
+    split_error_message,
+)
 from ui.setting_ui import LLMConfigCard, SettingUI, inspect_llm_draft
 from utils.llm_provider import capability_confirmation_for
+from utils.llm_transport import LLMErrorCategory, LLMTransportError
+
+
+class OperatorErrorMessageTests(unittest.TestCase):
+    def test_unknown_exception_keeps_its_message_instead_of_only_the_class_name(self):
+        message = llm_error_message(
+            FileNotFoundError(
+                "[Errno 2] No such file or directory: "
+                "'litellm/model_prices_and_context_window_backup.json'"
+            )
+        )
+        hint, detail = split_error_message(message)
+        self.assertTrue(hint)
+        self.assertIn("FileNotFoundError", detail)
+        self.assertIn("model_prices_and_context_window_backup.json", detail)
+
+    def test_transport_error_shows_hint_and_redacted_detail(self):
+        error = LLMTransportError(
+            LLMErrorCategory.PARAMETER,
+            "模型请求参数不被当前供应商接受，请检查模型和配置",
+            provider="deepseek",
+            model_name="deepseek-chat",
+            detail="BadRequestError: model 'ds-999' does not exist",
+        )
+        message = llm_error_message(error)
+        hint, detail = split_error_message(message)
+        self.assertEqual(hint, "模型请求参数不被当前供应商接受，请检查模型和配置")
+        self.assertIn("ds-999", detail)
+        self.assertIn(ERROR_DETAIL_SEPARATOR, message)
+
+    def test_service_error_text_is_passed_through_untouched(self):
+        message = llm_error_message(LLMServiceError("API Key 无效或已过期。"))
+        self.assertEqual(message, "API Key 无效或已过期。")
+        self.assertEqual(split_error_message(message), ("API Key 无效或已过期。", ""))
 
 
 class SettingPolicyTests(unittest.TestCase):
